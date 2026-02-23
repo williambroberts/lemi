@@ -62,24 +62,29 @@ class Terrain {
     private fun drawBoulder(canvas: android.graphics.Canvas, boulder: Boulder, cameraX: Float, cameraY: Float, paint: android.graphics.Paint) {
         val groundY = getGroundY(boulder.x) - cameraY
         val screenX = boulder.x - cameraX
-        val halfWidth = boulder.width / 2f
 
-        val path = android.graphics.Path()
-        // start at left base of boulder on the terrain
-        path.moveTo(screenX - halfWidth, groundY)
+        // get slope angle at this boulder's position
+        val sampleDist = 10f
+        val yLeft = getGroundY(boulder.x - sampleDist)
+        val yRight = getGroundY(boulder.x + sampleDist)
+        val angle = Math.toDegrees(Math.atan2((yRight - yLeft).toDouble(), (sampleDist * 2).toDouble())).toFloat()
 
-        // cubic bezier curve over the top - control points push it up to create the lump shape
-        path.cubicTo(
-            screenX - halfWidth, groundY - boulder.height,  // left control point
-            screenX + halfWidth, groundY - boulder.height,  // right control point
-            screenX + halfWidth, groundY                     // end point at right base
+        canvas.save()
+
+        // move origin to boulder base center, rotate to match slope
+        canvas.translate(screenX, groundY)
+        canvas.rotate(angle)
+
+        // draw rectangle sitting on the ground (y goes upward so height is negative)
+        canvas.drawRect(
+            -boulder.width / 2f,    // left
+            -boulder.height,         // top (above ground)
+            boulder.width / 2f,     // right
+            0f,                      // bottom (at ground level)
+            paint
         )
 
-        // close back along the ground
-        path.lineTo(screenX - halfWidth, groundY)
-        path.close()
-
-        canvas.drawPath(path, paint)
+        canvas.restore()
     }
     // given a world x position, return the ground y at that x by interpolating between the two nearest points
     fun getGroundY(worldX: Float): Float {

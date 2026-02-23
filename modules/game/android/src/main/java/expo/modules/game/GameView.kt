@@ -29,7 +29,7 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
     private val terrain = Terrain()
 
     private val terrainPaint = Paint().apply {
-        color = Color.parseColor("#107d81")
+        color = Color.parseColor("#7be4e7")
         style = Paint.Style.FILL
     }
 
@@ -76,12 +76,12 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
     private var isOnGround = false
 
     // --- ACTIONS ---
-    private val jumpVelocity = -15f  // negative = upward, tune this for jump height
+    private val jumpVelocity = -5f  // negative = upward, tune this for jump height
     private var jumpRequested = false
     private val gestureDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
-    override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-        jumpRequested = true
-        return true
+        override fun onDown(e: MotionEvent): Boolean {
+            jumpRequested = true
+            return true
         }
     })
     // --- CAMERA ---
@@ -116,52 +116,58 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
     // --- GAME LOOP FUNCTIONS ---
 
     private fun update() {
-         if (jumpRequested && isOnGround) {
-            velocityY = jumpVelocity
-            isOnGround = false
-            jumpRequested = false
-        }
-        val sampleDistance = 5f
-        val yAhead = terrain.getGroundY(ballX + sampleDistance)
-        val yBehind = terrain.getGroundY(ballX - sampleDistance)
-        val slope = (yAhead - yBehind) / (sampleDistance * 2f)
+    // handle jump input first
+    if (jumpRequested && isOnGround) {
+        velocityY = jumpVelocity
+        isOnGround = false
+        jumpRequested = false
+    }
 
-        if (isOnGround) {
-            velocityX += slope * gravity
-            velocityX *= friction
-            velocityX = velocityX.coerceIn(-maxVelocity, maxVelocity)
-            if (velocityX > 0f && velocityX < minVelocity) velocityX = minVelocity
-            if (velocityX < 0f && velocityX > -minVelocity) velocityX = -minVelocity
-            if (velocityX == 0f) velocityX = minVelocity
-        }
+    // horizontal slope physics
+    val sampleDistance = 5f
+    val yAhead = terrain.getGroundY(ballX + sampleDistance)
+    val yBehind = terrain.getGroundY(ballX - sampleDistance)
+    val slope = (yAhead - yBehind) / (sampleDistance * 2f)
 
-        if (!isOnGround) {
-            velocityY += gravityY
-        }
+    velocityX += slope * gravity
+    velocityX *= friction
+    velocityX = velocityX.coerceIn(-maxVelocity, maxVelocity)
+    if (velocityX > 0f && velocityX < minVelocity) velocityX = minVelocity
+    if (velocityX < 0f && velocityX > -minVelocity) velocityX = -minVelocity
+    if (velocityX == 0f) velocityX = minVelocity
 
-        ballX += velocityX
+    // move horizontally
+    ballX += velocityX
+
+    if (isOnGround) {
+        // snap directly to terrain surface every frame
+        ballY = terrain.getGroundY(ballX) - ballRadius
+        velocityY = 0f
+    } else {
+        // airborne - apply gravity and move vertically
+        velocityY += gravityY
         ballY += velocityY
 
+        // check if we've landed
         val terrainY = terrain.getGroundY(ballX)
         if (ballY + ballRadius >= terrainY) {
             ballY = terrainY - ballRadius
-            velocityY = if (velocityY > 8f) -velocityY * 0.3f else 0f
+            velocityY = 0f
             isOnGround = true
-        } else {
-            isOnGround = false
         }
-
-        ballRotation += (velocityX / circumference) * 360f
-
-        val targetCameraX = ballX - screenWidth / 2f
-        val targetCameraY = ballY - screenHeight / 2f
-
-        smoothCameraX += (targetCameraX - smoothCameraX) * cameraSmoothing
-        smoothCameraY += (targetCameraY - smoothCameraY) * cameraSmoothing
-
-        cameraX = smoothCameraX
-        cameraY = smoothCameraY
     }
+
+    ballRotation += (velocityX / circumference) * 360f
+
+    val targetCameraX = ballX - screenWidth * 0.2f
+    val targetCameraY = ballY - screenHeight / 2f
+
+    smoothCameraX += (targetCameraX - smoothCameraX) * cameraSmoothing
+    smoothCameraY += (targetCameraY - smoothCameraY) * cameraSmoothing
+
+    cameraX = smoothCameraX
+    cameraY = smoothCameraY
+}
 
     private fun draw() {
         if (screenWidth == 0f || !surfaceReady) return
@@ -177,7 +183,7 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
         } ?: return
 
         try {
-            canvas.drawColor(Color.parseColor("#c5b3ab"))
+            canvas.drawColor(Color.parseColor("#dd835d"))
             terrain.draw(canvas, cameraX, cameraY, screenWidth, screenHeight, terrainPaint)
 
             val screenX = ballX - cameraX
@@ -210,7 +216,7 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
         terrain.generate(screenHeight)
         ballX = screenWidth * 0.5f
         ballY = terrain.getGroundY(ballX) - ballRadius
-        smoothCameraX = ballX - screenWidth / 2f
+        smoothCameraX = ballX - screenWidth * 0.2f
         smoothCameraY = ballY - screenHeight / 2f
         cameraX = smoothCameraX
         cameraY = smoothCameraY
