@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android", "web"],
+  "apple": {
+    "modules": ["GameModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.game.GameModule"]
+  }
+}
