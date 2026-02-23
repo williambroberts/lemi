@@ -11,7 +11,7 @@ class Terrain {
     private val points = mutableListOf<Point>()
 
     // how far apart each terrain point is in world space
-    private val segmentWidth = 200f
+    private val segmentWidth = 800f
 
     fun generate(screenHeight: Float) {
         points.clear()
@@ -21,8 +21,8 @@ class Terrain {
         var currentY = baseY
         for (i in 0..200) {
             val x = i * segmentWidth
-            if (i >= 3) {
-                currentY += (Math.random() * (screenHeight * 0.1) - (screenHeight * 0.05)).toFloat()
+            if (i >= 3) {//todow why
+                currentY += (Math.random() * (screenHeight * 0.3) - (screenHeight * 0.01)).toFloat()
             }
             points.add(Point(x, currentY))
         }
