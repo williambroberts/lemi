@@ -28,7 +28,17 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
     }
 
     // --- GAME STATE ---
-    
+    // add with other state variables
+    private val terrain = Terrain()
+
+    // replace groundPaint with a terrain paint
+    private val terrainPaint = Paint().apply {
+        color = Color.parseColor("#b3dd65")
+        style = Paint.Style.FILL
+    }
+    private var screenWidth = 0f
+    private var screenHeight = 0f
+    private var groundY = 0f
     // the balls position in WORLD space, x keeps growing as the ball moves right
     private var ballX = 500f
     private var ballY = 500f
@@ -39,6 +49,7 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
 
     // cameraX tracks how far we have scrolled, subtract this when drawing to convert world -> screen
     private var cameraX = 0f
+    private var cameraY = 0f
 
     // radius of the ball in pixels
     private val ballRadius = 40f
@@ -58,7 +69,7 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
     }
     // paint for a simple ground line so we can see movement
     private val groundPaint = Paint().apply {
-        color = Color.GREEN
+        color = Color.parseColor("#9edb8f")
         strokeWidth = 6f
     }
 
@@ -116,33 +127,38 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
             // dir is 1f for right, -1f for left
             velocityX = dir * 12f
         }
+        ballY = terrain.getGroundY(ballX) - ballRadius
 
         // move the ball by its velocity
         ballX += velocityX
+        
         ballRotation += (velocityX / circumference) * 360f
 
         // camera follows the ball, keeping it centered horizontally on screen
         cameraX = ballX - width / 2f
+        cameraY = ballY - screenHeight / 2f
     }
 
     // draw is called every frame to render the current state
     private fun draw() {
-
+        if (screenWidth == 0f) return
         // lockCanvas gives us a canvas to draw on, returns null if surface isnt ready
         val canvas = surfaceView.holder.lockCanvas() ?: return
-
+        
         // clear the screen with a dark background each frame
-        canvas.drawColor(Color.parseColor("#1a1a2e"))
+        canvas.drawColor(Color.parseColor("#9be9e9"))
+        terrain.draw(canvas, cameraX,cameraY, screenWidth, screenHeight, terrainPaint)
 
         // convert ball world position to screen position by subtracting cameraX
         val screenX = ballX - cameraX
-        val screenY = ballY
+        val screenY = ballY - cameraY
+
 
         // draw the ball as a white circle
         canvas.drawCircle(screenX, screenY, ballRadius, ballPaint)
 
         // draw a simple ground line across the screen at y=600 for reference
-        canvas.drawLine(0f, 600f, width.toFloat(), 600f, groundPaint)
+        canvas.drawLine(0f, groundY, width.toFloat(), groundY, groundPaint)
 
         // draw the world x position for debugging so we can see the ball is actually moving in world space
         canvas.drawText("world x: ${ballX.toInt()}", 40f, 60f, textPaint)
@@ -177,9 +193,7 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
 
     // called when the surface is created and ready to draw on
     override fun surfaceCreated(holder: SurfaceHolder) {
-        // set ball starting y to be just above the ground line
-        ballY = 560f
-
+       
         // start the game loop
         isRunning = true
         gameThread = Thread { gameLoop() }
@@ -188,7 +202,14 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
 
     // called if the surface size changes e.g screen rotation
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        // nothing needed here for now
+        
+        screenWidth = width.toFloat()
+        screenHeight = height.toFloat()
+        terrain.generate(screenHeight)
+        ballY = screenHeight * 0.85f
+        ballX = screenWidth * 0.5f
+        groundY = ballY + ballRadius
+
     }
 
     // called when the surface is destroyed e.g app goes to background
