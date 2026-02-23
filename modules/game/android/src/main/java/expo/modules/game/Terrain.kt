@@ -1,7 +1,9 @@
 package expo.modules.gameinternals
 
 class Terrain {
+    data class Boulder(val x: Float, val height: Float, val width: Float)
 
+    private val boulders = mutableListOf<Boulder>()
     // a terrain point is just an x and y in world space
     data class Point(val x: Float, val y: Float)
 
@@ -10,12 +12,20 @@ class Terrain {
     // y is the height of the ground at that x position
     private val points = mutableListOf<Point>()
 
+
+    private val path = android.graphics.Path()
+
     // how far apart each terrain point is in world space
     private val segmentWidth = 800f
-
+    private val boulderPaint = android.graphics.Paint().apply {
+        color = android.graphics.Color.parseColor("#8B7355")
+        style = android.graphics.Paint.Style.FILL
+        isAntiAlias = true
+    }
     fun generate(screenHeight: Float) {
+        
         points.clear()
-
+         
         val baseY = screenHeight * 0.5f
 
         var currentY = baseY
@@ -26,6 +36,17 @@ class Terrain {
             }
             points.add(Point(x, currentY))
         }
+
+        boulders.clear()
+        for (i in 5..195) {
+            // roughly 1 in 10 segments gets a boulder
+            if (Math.random() < 0.1) {
+                val boulderX = points[i].x + (Math.random() * segmentWidth * 0.5).toFloat()
+                val boulderHeight = (screenHeight * 0.04 + Math.random() * screenHeight * 0.04).toFloat()
+                val boulderWidth = (boulderHeight * 1.5f + Math.random() * boulderHeight).toFloat()
+                boulders.add(Boulder(boulderX, boulderHeight, boulderWidth))
+            }
+        }
     }
     // catmull-rom spline interpolation between 4 points, t is 0..1 between p1 and p2
     private fun catmullRom(p0: Float, p1: Float, p2: Float, p3: Float, t: Float): Float {
@@ -35,6 +56,30 @@ class Terrain {
             (2f * p0 - 5f * p1 + 4f * p2 - p3) * t * t +
             (-p0 + 3f * p1 - 3f * p2 + p3) * t * t * t
         )
+    }
+    
+
+    private fun drawBoulder(canvas: android.graphics.Canvas, boulder: Boulder, cameraX: Float, cameraY: Float, paint: android.graphics.Paint) {
+        val groundY = getGroundY(boulder.x) - cameraY
+        val screenX = boulder.x - cameraX
+        val halfWidth = boulder.width / 2f
+
+        val path = android.graphics.Path()
+        // start at left base of boulder on the terrain
+        path.moveTo(screenX - halfWidth, groundY)
+
+        // cubic bezier curve over the top - control points push it up to create the lump shape
+        path.cubicTo(
+            screenX - halfWidth, groundY - boulder.height,  // left control point
+            screenX + halfWidth, groundY - boulder.height,  // right control point
+            screenX + halfWidth, groundY                     // end point at right base
+        )
+
+        // close back along the ground
+        path.lineTo(screenX - halfWidth, groundY)
+        path.close()
+
+        canvas.drawPath(path, paint)
     }
     // given a world x position, return the ground y at that x by interpolating between the two nearest points
     fun getGroundY(worldX: Float): Float {
@@ -56,7 +101,7 @@ class Terrain {
     fun draw(canvas: android.graphics.Canvas, cameraX: Float,cameraY:Float, screenWidth: Float, screenHeight: Float, paint: android.graphics.Paint) {
         if (points.isEmpty()) return
 
-        val path = android.graphics.Path()
+        path.reset()
 
         // find which points are visible on screen
         val startIndex = ((cameraX) / segmentWidth).toInt().minus(1).coerceAtLeast(0)
@@ -83,7 +128,15 @@ class Terrain {
         path.lineTo(points[endIndex].x - cameraX, screenHeight + 1000f)//todow
         path.lineTo(firstPoint.x - cameraX, screenHeight + 1000f)//todow
         path.close()
+        
 
         canvas.drawPath(path, paint)
+        
+        for (boulder in boulders) {
+            val screenX = boulder.x - cameraX
+            if (screenX > -boulder.width && screenX < screenWidth + boulder.width) {
+                drawBoulder(canvas, boulder, cameraX, cameraY, boulderPaint)
+            }
+        }
     }
 }

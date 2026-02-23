@@ -14,6 +14,7 @@ import android.graphics.Matrix
 import android.graphics.Shader
 import android.graphics.Bitmap
 import expo.modules.game.R
+import android.view.GestureDetector
 
 class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(context, appContext),
     SurfaceHolder.Callback {
@@ -50,6 +51,9 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
     private val ballDiameter = (ballRadius * 2).toInt()
     private val scaledBitmap = Bitmap.createScaledBitmap(rawBitmap, ballDiameter, ballDiameter, true)
 
+    private val bitmapMatrix = Matrix()
+
+
     private val ballPaint = Paint().apply {
         shader = BitmapShader(scaledBitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
         isAntiAlias = true
@@ -65,17 +69,26 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
     // --- PHYSICS ---
     private val gravity = 1.2f
     private val friction = 0.995f
-    private val maxVelocity = 45f
+    private val maxVelocity = 35f
     private val minVelocity = 5f
     private var velocityY = 0f
-    private val gravityY = 1.2f
+    private val gravityY = 0.3f
     private var isOnGround = false
 
+    // --- ACTIONS ---
+    private val jumpVelocity = -15f  // negative = upward, tune this for jump height
+    private var jumpRequested = false
+    private val gestureDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
+    override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+        jumpRequested = true
+        return true
+        }
+    })
     // --- CAMERA ---
     private var smoothCameraX = 0f
     private var smoothCameraY = 0f
     private val cameraSmoothing = 0.08f
-
+  
     // --- GAME LOOP ---
     private var isRunning = false
     private var surfaceReady = false
@@ -95,17 +108,19 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
         addView(surfaceView)
 
         surfaceView.setOnTouchListener { _, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {}
-                MotionEvent.ACTION_UP -> {}
-            }
-            true
+            gestureDetector.onTouchEvent(event)
+            true//handle the event
         }
     }
 
     // --- GAME LOOP FUNCTIONS ---
 
     private fun update() {
+         if (jumpRequested && isOnGround) {
+            velocityY = jumpVelocity
+            isOnGround = false
+            jumpRequested = false
+        }
         val sampleDistance = 5f
         val yAhead = terrain.getGroundY(ballX + sampleDistance)
         val yBehind = terrain.getGroundY(ballX - sampleDistance)
@@ -133,13 +148,7 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
             velocityY = if (velocityY > 8f) -velocityY * 0.3f else 0f
             isOnGround = true
         } else {
-            if (velocityY < -3f) {
-                isOnGround = false
-            } else {
-                ballY = terrainY - ballRadius
-                velocityY = 0f
-                isOnGround = true
-            }
+            isOnGround = false
         }
 
         ballRotation += (velocityX / circumference) * 360f
@@ -176,10 +185,9 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
 
             canvas.drawText("world x: ${ballX.toInt()}", 40f, 60f, textPaint)
 
-            val matrix = Matrix()
-            matrix.setTranslate(screenX - ballRadius, screenY - ballRadius)
-            matrix.postRotate(ballRotation, screenX, screenY)
-            (ballPaint.shader as BitmapShader).setLocalMatrix(matrix)
+            bitmapMatrix.setTranslate(screenX - ballRadius, screenY - ballRadius)
+            bitmapMatrix.postRotate(ballRotation, screenX, screenY)
+            (ballPaint.shader as BitmapShader).setLocalMatrix(bitmapMatrix)
 
             canvas.drawCircle(screenX, screenY, ballRadius, ballPaint)
         } finally {
