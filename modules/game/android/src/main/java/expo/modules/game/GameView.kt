@@ -33,7 +33,7 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
 
     // replace groundPaint with a terrain paint
     private val terrainPaint = Paint().apply {
-        color = Color.parseColor("#b3dd65")
+        color = Color.parseColor("#ebd58f")
         style = Paint.Style.FILL
     }
     private var screenWidth = 0f
@@ -86,12 +86,15 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
 
     // the thread that runs our update + draw loop
     private var gameThread: Thread? = null
-
+    private val gravity = 0.5f
+    private val friction = 0.995f
+    private val maxVelocity = 20f
+    private val minVelocity = 1.5f
     // --- INPUT ---
 
     // we track which direction the user is pressing
     // true = pressing right side of screen, false = pressing left, null = not pressing
-    private var touchDirection: Float? = null
+    
 
     init {
         // add the surfaceview into our expo view so it appears on screen
@@ -103,14 +106,10 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
 
                 // when the user puts their finger down, check which side of the screen they touched
                 MotionEvent.ACTION_DOWN -> {
-                    // if touch x is on the right half of the screen, move right, else move left
-                    touchDirection = if (event.x > width / 2f) 1f else -1f
+                    
                 }
 
-                // when finger is lifted, stop moving
                 MotionEvent.ACTION_UP -> {
-                    touchDirection = null
-                    velocityX = 0f
                 }
             }
             true // return true to say we handled the event
@@ -122,11 +121,27 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
     // update is called every frame to move things
     private fun update() {
 
-        // if the user is pressing a direction, accelerate the ball that way
-        touchDirection?.let { dir ->
-            // dir is 1f for right, -1f for left
-            velocityX = dir * 12f
-        }
+        val sampleDistance = 5f
+        val yAhead = terrain.getGroundY(ballX + sampleDistance)
+        val yBehind = terrain.getGroundY(ballX - sampleDistance)
+
+        // slope is the rise over run, positive = going downhill to the right
+        val slope = (yAhead - yBehind) / (sampleDistance * 2f)
+         // gravity pulls the ball along the slope
+        velocityX += slope * gravity
+
+        // friction slows the ball down over time
+        velocityX *= friction
+        // clamp to max speed in either direction
+        velocityX = velocityX.coerceIn(-maxVelocity, maxVelocity)
+
+        // never let the ball fully stop - nudge it in whichever direction it was already going
+        if (velocityX > 0f && velocityX < minVelocity) velocityX = minVelocity
+        if (velocityX < 0f && velocityX > -minVelocity) velocityX = -minVelocity
+
+        // if it somehow hits exactly 0, start rolling right
+        if (velocityX == 0f) velocityX = minVelocity
+
         ballY = terrain.getGroundY(ballX) - ballRadius
 
         // move the ball by its velocity
@@ -146,7 +161,7 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
         val canvas = surfaceView.holder.lockCanvas() ?: return
         
         // clear the screen with a dark background each frame
-        canvas.drawColor(Color.parseColor("#9be9e9"))
+        canvas.drawColor(Color.parseColor("#e9be9b"))
         terrain.draw(canvas, cameraX,cameraY, screenWidth, screenHeight, terrainPaint)
 
         // convert ball world position to screen position by subtracting cameraX

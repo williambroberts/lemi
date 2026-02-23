@@ -27,21 +27,29 @@ class Terrain {
             points.add(Point(x, currentY))
         }
     }
-
+    // catmull-rom spline interpolation between 4 points, t is 0..1 between p1 and p2
+    private fun catmullRom(p0: Float, p1: Float, p2: Float, p3: Float, t: Float): Float {
+        return 0.5f * (
+            (2f * p1) +
+            (-p0 + p2) * t +
+            (2f * p0 - 5f * p1 + 4f * p2 - p3) * t * t +
+            (-p0 + 3f * p1 - 3f * p2 + p3) * t * t * t
+        )
+    }
     // given a world x position, return the ground y at that x by interpolating between the two nearest points
     fun getGroundY(worldX: Float): Float {
-        if (points.isEmpty()) return 0f
+    if (points.isEmpty()) return 0f
 
-        // find which segment worldX falls in
-        val index = (worldX / segmentWidth).toInt().coerceIn(0, points.size - 2)
-        val left = points[index]
-        val right = points[index + 1]
+    val index = (worldX / segmentWidth).toInt().coerceIn(0, points.size - 2)
+    val t = ((worldX - points[index].x) / segmentWidth).coerceIn(0f, 1f)
 
-        // how far between left and right are we? 0.0 = at left, 1.0 = at right
-        val t = ((worldX - left.x) / segmentWidth).coerceIn(0f, 1f)
+    // get 4 surrounding points, clamping at the edges
+    val p0 = points[(index - 1).coerceAtLeast(0)].y
+    val p1 = points[index].y
+    val p2 = points[index + 1].y
+    val p3 = points[(index + 2).coerceAtMost(points.size - 1)].y
 
-        // linear interpolation between the two y values
-        return left.y + (right.y - left.y) * t
+    return catmullRom(p0, p1, p2, p3, t)
     }
 
     // draw the terrain as a filled polygon so it looks like ground, not just a line
@@ -56,11 +64,19 @@ class Terrain {
         val endIndex = ((cameraX + screenWidth) / segmentWidth).toInt().plus(1).coerceAtMost(points.size - 1)   
         // move to the first visible point
         val firstPoint = points[startIndex]
-        path.moveTo(firstPoint.x - cameraX, firstPoint.y - cameraY)
+        path.moveTo(firstPoint.x - cameraX, getGroundY(firstPoint.x) - cameraY)
 
-        // draw lines to each subsequent visible point
-        for (i in startIndex + 1..endIndex) {
-            path.lineTo(points[i].x - cameraX, points[i].y - cameraY)
+        // how many steps per segment, higher = smoother curve
+        val steps = 20
+
+        for (i in startIndex until endIndex) {
+            for (step in 1..steps) {
+                val t = step / steps.toFloat()
+                val worldX = points[i].x + t * segmentWidth
+                val screenX = worldX - cameraX
+                val screenY = getGroundY(worldX) - cameraY
+                path.lineTo(screenX, screenY)
+            }
         }
 
         // close the polygon down to the bottom of the screen so it looks filled
