@@ -1,15 +1,13 @@
 import { GameView } from "@/modules/game";
-import * as ScreenOrientation from "expo-screen-orientation";
-import { useEffect } from "react";
 import { View } from "react-native";
 
 export default function Index() {
-  useEffect(() => {
-    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
-    return () => {
-      ScreenOrientation.unlockAsync();
-    };
-  }, []);
+  // useEffect(() => {
+  //   ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
+  //   return () => {
+  //     ScreenOrientation.unlockAsync();
+  //   };
+  // }, []);
   return (
     <View
       style={{

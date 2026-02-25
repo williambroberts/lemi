@@ -88,7 +88,7 @@ class Terrain {
     }
     // given a world x position, return the ground y at that x by interpolating between the two nearest points
     fun getGroundY(worldX: Float): Float {
-    if (points.isEmpty()) return 0f
+   if (points.size < 2) return 0f
 
     val index = (worldX / segmentWidth).toInt().coerceIn(0, points.size - 2)
     val t = ((worldX - points[index].x) / segmentWidth).coerceIn(0f, 1f)

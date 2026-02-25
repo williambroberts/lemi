@@ -75,12 +75,15 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
     private val gravityY = 0.3f
     private var isOnGround = false
 
-    // --- ACTIONS ---
+    // --- ACTIONS --
+    private val timeFor1Rotation = 2f
+    private var isHolding = false
     private val jumpVelocity = -5f  // negative = upward, tune this for jump height
     private var jumpRequested = false
     private val gestureDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent): Boolean {
-            jumpRequested = true
+            if (isOnGround) jumpRequested = true
+            if (!isOnGround) isHolding = true
             return true
         }
     })
@@ -108,6 +111,9 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
         addView(surfaceView)
 
         surfaceView.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_UP || event.action == MotionEvent.ACTION_CANCEL) {
+                isHolding = false
+            }
             gestureDetector.onTouchEvent(event)
             true//handle the event
         }
@@ -117,7 +123,7 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
 
     private fun update() {
     // handle jump input first
-    if (jumpRequested && isOnGround) {
+    if (jumpRequested) {
         velocityY = jumpVelocity
         isOnGround = false
         jumpRequested = false
@@ -157,8 +163,10 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
         }
     }
 
-    ballRotation += (velocityX / circumference) * 360f
-
+    // ballRotation += (velocityX / circumference) * 360f
+    if (isHolding) {
+        ballRotation += (360f / (timeFor1Rotation * 60f)) // 1 rotation per 2 seconds at 60fps
+    }
     val targetCameraX = ballX - screenWidth * 0.2f
     val targetCameraY = ballY - screenHeight / 2f
 
@@ -227,5 +235,6 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
         surfaceReady = false
         isRunning = false
         choreographer.removeFrameCallback(frameCallback)
+        Thread.sleep(32)
     }
 }
