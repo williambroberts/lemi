@@ -1,5 +1,5 @@
 import { GameView } from "@/modules/game";
-import { View } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 
 export default function Index() {
   // useEffect(() => {
@@ -9,7 +9,7 @@ export default function Index() {
   //   };
   // }, []);
   return (
-    <View
+    <SafeAreaView
       style={{
         flex: 1,
         justifyContent: "center",
@@ -17,6 +17,6 @@ export default function Index() {
       }}
     >
       <GameView style={{ flex: 1, backgroundColor: "red", width: "100%" }} />
-    </View>
+    </SafeAreaView>
   );
 }
