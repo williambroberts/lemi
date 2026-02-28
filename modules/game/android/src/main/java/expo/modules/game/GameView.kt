@@ -40,8 +40,18 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
     private var playerHP = 100; private val PLAYER_MAX_HP = 100
     private val PLAYER_R = 26f; private val PLAYER_SPD = 300f
     private var playerAngle   = 0f
-    private var playerHurtFlash = 0f   // screen flash when hit
-    private var playerInvincible = 0f  // brief invincibility after hit
+    private var playerHurtFlash = 0f
+    private var playerInvincible = 0f
+    // Animation
+    private var walkCycle     = 0f   // 0..2π oscillates as player moves
+    private var isMoving      = false
+    private var lastPlayerX   = WORLD_W / 2f
+    private var lastPlayerY   = WORLD_H * 0.85f
+
+    // Brick fragments (hit effect)
+    data class BrickFrag(var x: Float, var y: Float, var vx: Float, var vy: Float,
+        var rot: Float, var rotSpd: Float, var life: Float, val color: Int, val w: Float, val h: Float)
+    private val frags = mutableListOf<BrickFrag>()
 
     // =========================================================================
     // Weapons & items
@@ -177,19 +187,49 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
     // =========================================================================
     // Paint
     // =========================================================================
-    private val tilePaint1  = Paint().apply { color = Color.rgb(38,50,38); style = Paint.Style.FILL }
-    private val tilePaint2  = Paint().apply { color = Color.rgb(30,42,30); style = Paint.Style.FILL }
-    private val wallPaint   = Paint().apply { color = Color.rgb(20,28,20); style = Paint.Style.FILL }
-    private val bgPaint     = Paint().apply { color = Color.rgb(15,20,15); style = Paint.Style.FILL }
+    // Floor — isometric brick tiles
+    private val brickTopPaint    = Paint().apply { style = Paint.Style.FILL }  // set per tile
+    private val brickSidePaint   = Paint().apply { style = Paint.Style.FILL }
+    private val brickMortarPaint = Paint().apply { color = Color.rgb(80,60,50); style = Paint.Style.STROKE; strokeWidth = 1.5f }
+    private val studPaint        = Paint().apply { style = Paint.Style.FILL; isAntiAlias = true }
+    private val studRimPaint     = Paint().apply { style = Paint.Style.STROKE; strokeWidth = 1.5f; isAntiAlias = true }
+    private val wallPaint        = Paint().apply { color = Color.rgb(30,22,18); style = Paint.Style.FILL }
+    private val bgPaint          = Paint().apply { color = Color.rgb(20,14,10); style = Paint.Style.FILL }
 
-    private val playerBodyPaint   = Paint().apply { color = Color.rgb(80,210,120); style = Paint.Style.FILL; isAntiAlias = true }
-    private val playerStrokePaint = Paint().apply { color = Color.rgb(40,140,70);  style = Paint.Style.STROKE; strokeWidth = 4f; isAntiAlias = true }
-    private val playerChargePaint = Paint().apply { color = Color.argb(160,255,255,80); style = Paint.Style.STROKE; strokeWidth = 5f; isAntiAlias = true }
-    private val dirPaint          = Paint().apply { color = Color.rgb(40,140,70);  style = Paint.Style.FILL; isAntiAlias = true }
+    // Player — minifig colours
+    private val figTorsoTopPaint   = Paint().apply { color = Color.rgb(30,90,200);   style = Paint.Style.FILL; isAntiAlias = true } // blue top face
+    private val figTorsoSidePaint  = Paint().apply { color = Color.rgb(18,55,130);   style = Paint.Style.FILL; isAntiAlias = true } // darker side
+    private val figHeadPaint       = Paint().apply { color = Color.rgb(255,220,100); style = Paint.Style.FILL; isAntiAlias = true } // yellow head
+    private val figHeadSidePaint   = Paint().apply { color = Color.rgb(190,155,55);  style = Paint.Style.FILL; isAntiAlias = true }
+    private val figLegTopPaint     = Paint().apply { color = Color.rgb(40,40,40);    style = Paint.Style.FILL; isAntiAlias = true }
+    private val figLegSidePaint    = Paint().apply { color = Color.rgb(20,20,20);    style = Paint.Style.FILL; isAntiAlias = true }
+    private val figArmPaint        = Paint().apply { color = Color.rgb(30,90,200);   style = Paint.Style.FILL; isAntiAlias = true }
+    private val figOutlinePaint    = Paint().apply { color = Color.rgb(10,10,10);    style = Paint.Style.STROKE; strokeWidth = 2.5f; isAntiAlias = true }
+    private val figFacePaint       = Paint().apply { color = Color.rgb(10,10,10);    style = Paint.Style.STROKE; strokeWidth = 2f; isAntiAlias = true; strokeCap = Paint.Cap.ROUND }
+    private val playerChargePaint  = Paint().apply { color = Color.argb(160,255,255,80); style = Paint.Style.STROKE; strokeWidth = 5f; isAntiAlias = true }
+    private val hurtOverlayPaint  = Paint().apply { style = Paint.Style.FILL }
+    private val shadowPaint       = Paint().apply { color = Color.argb(70,0,0,0);  style = Paint.Style.FILL; isAntiAlias = true }
     private val eyePaint          = Paint().apply { color = Color.WHITE; style = Paint.Style.FILL; isAntiAlias = true }
     private val pupilPaint        = Paint().apply { color = Color.rgb(10,10,10);   style = Paint.Style.FILL; isAntiAlias = true }
-    private val shadowPaint       = Paint().apply { color = Color.argb(55,0,0,0);  style = Paint.Style.FILL; isAntiAlias = true }
-    private val hurtOverlayPaint  = Paint().apply { style = Paint.Style.FILL }
+    // Enemy minifig tints (reuse figXxx paints with colour overrides)
+    private val figEnemyHead      = Paint().apply { color = Color.rgb(255,220,100); style = Paint.Style.FILL; isAntiAlias = true }
+    private val figEnemyTorsoTop  = Paint().apply { style = Paint.Style.FILL; isAntiAlias = true }
+    private val figEnemyTorsoSide = Paint().apply { style = Paint.Style.FILL; isAntiAlias = true }
+    private val figEnemyLegTop    = Paint().apply { color = Color.rgb(40,40,40);   style = Paint.Style.FILL; isAntiAlias = true }
+    private val fragPaint         = Paint().apply { style = Paint.Style.FILL; isAntiAlias = true }
+    // Cached paints reused inside drawMinifig (colours set per call)
+    private val mfLegSidePaint    = Paint().apply { style = Paint.Style.FILL; isAntiAlias = true }
+    private val mfLegTopPaint     = Paint().apply { style = Paint.Style.FILL; isAntiAlias = true }
+    private val mfArmFillPaint    = Paint().apply { style = Paint.Style.FILL; isAntiAlias = true }
+    private val mfArmSidePaint    = Paint().apply { style = Paint.Style.FILL; isAntiAlias = true }
+    private val mfHeadFillPaint   = Paint().apply { style = Paint.Style.FILL; isAntiAlias = true }
+    private val mfHeadSidePaint   = Paint().apply { style = Paint.Style.FILL; isAntiAlias = true }
+    private val mfEyeDotPaint     = Paint().apply { color = Color.rgb(10,10,10); style = Paint.Style.FILL; isAntiAlias = true }
+    private val mfShooterRingPaint= Paint().apply { color = Color.argb(100,255,120,120); style = Paint.Style.STROKE; isAntiAlias = true }
+    private val borderPaint       = Paint().apply { color=Color.argb(120,80,180,80); style=Paint.Style.STROKE; strokeWidth=8f }
+    private val potHighlightPaint = Paint().apply { color=Color.argb(80,200,220,255); style=Paint.Style.FILL }
+    private val keyRimPaint       = Paint().apply { color=Color.rgb(200,160,30); style=Paint.Style.STROKE; isAntiAlias=true }
+    private val keyShaftPaint     = Paint().apply { color=Color.rgb(255,210,50); style=Paint.Style.STROKE; isAntiAlias=true }
 
     private val enemyBodyPaint    = Paint().apply { style = Paint.Style.FILL; isAntiAlias = true }
     private val enemyStrokePaint  = Paint().apply { style = Paint.Style.STROKE; strokeWidth = 3f; isAntiAlias = true }
@@ -491,6 +531,7 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
 
     private fun onEnemyKilled(e: Enemy) {
         score += e.type.scoreValue
+        spawnFrags(e.x, e.y, e.type.bodyColor, if (e.isBoss) 10 else 5)
         if (e.isBoss) {
             bossDefeated = true
             dropPickup(e.x, e.y, PickupType.HEART); dropPickup(e.x+60f, e.y, PickupType.RUPEE_RED)
@@ -588,6 +629,21 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
 
         if (playerInvincible > 0f) playerInvincible -= dt
         if (playerHurtFlash  > 0f) playerHurtFlash  -= dt
+
+        // Walk cycle
+        isMoving = (abs(playerX - lastPlayerX) > 0.5f || abs(playerY - lastPlayerY) > 0.5f)
+        if (isMoving) walkCycle = (walkCycle + dt * 8f) % (2f * Math.PI.toFloat())
+        lastPlayerX = playerX; lastPlayerY = playerY
+
+        // Brick fragments
+        frags.removeAll { f ->
+            f.x += f.vx * dt; f.y += f.vy * dt
+            f.vy += 180f * dt  // gravity
+            f.vx *= 0.92f
+            f.rot += f.rotSpd * dt
+            f.life -= dt
+            f.life <= 0f
+        }
         if (slashCd  > 0f) slashCd  -= dt
         if (shootCd  > 0f) shootCd  -= dt
         if (hammerCd > 0f) hammerCd -= dt
@@ -746,8 +802,23 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
     private fun hurtPlayer(dmg: Int) {
         if (playerInvincible > 0f) return
         playerHP -= dmg; playerHurtFlash = 0.25f; playerInvincible = 0.8f
+        spawnFrags(playerX, playerY, Color.rgb(30,90,200), 3)
         dmgNums.add(DmgNum(playerX, playerY-50f, "-$dmg", color = Color.rgb(255,80,80)))
         if (playerHP <= 0) { playerHP = 0; gameState = GameState.GAME_OVER; stateTimer = 3f }
+    }
+
+    private fun spawnFrags(x: Float, y: Float, color: Int, count: Int) {
+        repeat(count) {
+            val a = (Math.random() * 2 * Math.PI).toFloat()
+            val spd = 80f + (Math.random() * 220f).toFloat()
+            frags.add(BrickFrag(x, y, cos(a)*spd, sin(a)*spd - 60f,
+                rot = (Math.random() * 360f).toFloat(),
+                rotSpd = ((Math.random()-0.5)*400f).toFloat(),
+                life = 0.5f + (Math.random()*0.5f).toFloat(),
+                color = color,
+                w = 8f + (Math.random()*10f).toFloat(),
+                h = 6f + (Math.random()*8f).toFloat()))
+        }
     }
 
     private fun collectPickup(p: Pickup) {
@@ -780,7 +851,7 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
         playerHurtFlash=0f; playerInvincible=0f; score=0; rupees=0; keys=0
         slashCd=0f; shootCd=0f; hammerCd=0f; boomerangCd=0f; chargeHeld=0f; isCharging=false
         bullets.clear(); enemyBullets.clear(); slashes.clear(); hammerSwings.clear()
-        dmgNums.clear(); pickups.clear(); activeBoomerang=null
+        dmgNums.clear(); pickups.clear(); activeBoomerang=null; frags.clear()
         gameState=GameState.PLAYING; stateTimer=0f
         buildDungeon()
     }
@@ -799,18 +870,39 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
             canvas.drawRect(0f,0f,sw,sh,bgPaint)
             canvas.save(); canvas.translate(-camX,-camY)
 
-            // ---- Floor tiles ----
-            val startTX = (camX/TILE).toInt(); val startTY = (camY/TILE).toInt()
-            for (ty in startTY..(startTY+(sh/TILE).toInt()+1)) {
-                for (tx in startTX..(startTX+(sw/TILE).toInt()+1)) {
+            // ---- Isometric brick floor tiles ----
+            val SIDE_H = TILE * 0.18f  // depth of the brick side face
+            val startTX = (camX/TILE).toInt() - 1; val startTY = (camY/TILE).toInt() - 1
+            for (ty in startTY..(startTY+(sh/TILE).toInt()+2)) {
+                for (tx in startTX..(startTX+(sw/TILE).toInt()+2)) {
                     val wx = tx*TILE; val wy = ty*TILE
-                    if (wx<0||wy<0||wx>WORLD_W||wy>WORLD_H) { canvas.drawRect(wx,wy,wx+TILE,wy+TILE,wallPaint); continue }
-                    canvas.drawRect(wx,wy,wx+TILE,wy+TILE, if((tx+ty)%2==0) tilePaint1 else tilePaint2)
+                    if (wx < 0||wy < 0||wx >= WORLD_W||wy >= WORLD_H) {
+                        canvas.drawRect(wx,wy,wx+TILE,wy+TILE,wallPaint); continue
+                    }
+                    val even = (tx+ty)%2==0
+                    // Top face — alternating warm red/orange brick colours like Lego Classic
+                    brickTopPaint.color  = if (even) Color.rgb(190,65,45)  else Color.rgb(175,55,38)
+                    brickSidePaint.color = if (even) Color.rgb(120,38,25)  else Color.rgb(108,32,20)
+                    // Side face (bottom strip giving depth illusion)
+                    canvas.drawRect(wx, wy+TILE-SIDE_H, wx+TILE, wy+TILE, brickSidePaint)
+                    // Top face
+                    canvas.drawRect(wx, wy, wx+TILE, wy+TILE-SIDE_H, brickTopPaint)
+                    // Mortar lines on top
+                    canvas.drawRect(wx+0.75f, wy+0.75f, wx+TILE-0.75f, wy+TILE-SIDE_H-0.75f, brickMortarPaint)
+                    // Studs — 2×2 grid of raised circles
+                    val studR = TILE * 0.09f
+                    val sx1 = wx + TILE*0.28f; val sx2 = wx + TILE*0.72f
+                    val sy1 = wy + (TILE-SIDE_H)*0.30f; val sy2 = wy + (TILE-SIDE_H)*0.68f
+                    studPaint.color  = if (even) Color.rgb(205,80,58) else Color.rgb(188,68,50)
+                    studRimPaint.color = brickSidePaint.color
+                    for (sx in listOf(sx1,sx2)) for (sy in listOf(sy1,sy2)) {
+                        canvas.drawCircle(sx,sy,studR,studPaint)
+                        canvas.drawCircle(sx,sy,studR,studRimPaint)
+                    }
                 }
             }
             // World border
-            val bpaint = Paint().apply { color=Color.argb(120,80,180,80); style=Paint.Style.STROKE; strokeWidth=8f }
-            canvas.drawRect(0f,0f,WORLD_W,WORLD_H,bpaint)
+            canvas.drawRect(0f,0f,WORLD_W,WORLD_H,borderPaint)
 
             // ---- Pickups ----
             for (p in pickups) {
@@ -838,8 +930,7 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
                     canvas.drawRoundRect(rf,12f,12f,potFillPaint)
                     canvas.drawRoundRect(rf,12f,12f,potStrokePaint)
                     // Pot highlight
-                    val hp2 = Paint().apply{color=Color.argb(80,200,220,255);style=Paint.Style.FILL}
-                    canvas.drawOval(rf.left+8f,rf.top+6f,rf.right-8f,rf.top+20f,hp2)
+                    canvas.drawOval(rf.left+8f,rf.top+6f,rf.right-8f,rf.top+20f,potHighlightPaint)
                 } else {
                     canvas.drawRoundRect(rf,8f,8f,boxFillPaint)
                     canvas.drawRoundRect(RectF(rf.left+4f,rf.top+4f,rf.right-4f,rf.top+16f),4f,4f,boxHighlightPaint)
@@ -880,39 +971,47 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
                 slashPath.close(); canvas.drawPath(slashPath,hammerSwingPaint)
             }
 
+            // ---- Brick fragments ----
+            for (f in frags) {
+                fragPaint.color = Color.argb((f.life * 2f * 255).toInt().coerceIn(0,255), Color.red(f.color), Color.green(f.color), Color.blue(f.color))
+                canvas.save()
+                canvas.translate(f.x, f.y); canvas.rotate(f.rot)
+                canvas.drawRoundRect(-f.w/2f,-f.h/2f,f.w/2f,f.h/2f,2f,2f,fragPaint)
+                canvas.restore()
+            }
+
             // ---- Enemies ----
             for (e in enemies) {
                 val r = e.type.radius
-                // Sight cone (patrol/alert)
                 if (e.state == EnemyState.PATROL || e.state == EnemyState.ALERT) {
                     canvas.drawCircle(e.x,e.y,e.type.sightRange.coerceAtMost(350f),sightPaint)
                 }
-                canvas.drawOval(e.x-r*0.85f,e.y+r*0.55f,e.x+r*0.85f,e.y+r*0.95f,shadowPaint)
                 val isStunned = e.state == EnemyState.STUNNED
-                enemyBodyPaint.color = when { e.hurtFlash>0f -> Color.rgb(255,230,230); isStunned -> Color.rgb(170,170,230); else -> e.type.bodyColor }
-                enemyStrokePaint.color = e.type.strokeColor
-                canvas.drawCircle(e.x,e.y,r,enemyBodyPaint); canvas.drawCircle(e.x,e.y,r,enemyStrokePaint)
-                if (e.type.canShoot) {
-                    val rp = Paint().apply{color=Color.argb(120,255,120,120);style=Paint.Style.STROKE;strokeWidth=2.5f;isAntiAlias=true}
-                    canvas.drawCircle(e.x,e.y,r+5f,rp)
-                }
-                // Alert exclamation
+                val hurtCol   = e.hurtFlash > 0f
+                // Pick torso colour from enemy type, darken for side
+                val tc  = if (hurtCol) Color.rgb(255,200,200) else if (isStunned) Color.rgb(150,150,220) else e.type.bodyColor
+                val tcs = darken(tc, 0.55f)
+                figEnemyTorsoTop.color  = tc
+                figEnemyTorsoSide.color = tcs
+                // Draw the minifig at enemy position
+                drawMinifig(canvas, e.x, e.y, r, e.angle,
+                    torsoTop  = figEnemyTorsoTop,
+                    torsoSide = figEnemyTorsoSide,
+                    headColor = if (hurtCol) Color.rgb(255,230,230) else Color.rgb(255,220,100),
+                    legColor  = Color.rgb(35,35,35),
+                    walkPhase = if (e.state == EnemyState.CHASE) (e.attackCooldown * 8f) else 0f,
+                    showShooterRing = e.type.canShoot && !isStunned)
                 if (e.state == EnemyState.ALERT) {
                     hudTextPaint.textAlign = Paint.Align.CENTER; hudTextPaint.textSize = 36f
-                    canvas.drawText("!", e.x, e.y-r-10f, hudTextPaint)
+                    canvas.drawText("!", e.x, e.y-r-28f, hudTextPaint)
                 }
-                // Stun stars
-                if (isStunned) { canvas.drawCircle(e.x,e.y-r-14f,8f,stunPaint) }
-
-                val es=r/26f; val eox=cos(e.angle)*r*0.4f; val eoy=sin(e.angle)*r*0.4f
-                val epx=-sin(e.angle)*r*0.28f; val epy=cos(e.angle)*r*0.28f
-                canvas.drawCircle(e.x+eox+epx,e.y+eoy+epy,5f*es,eyePaint)
-                canvas.drawCircle(e.x+eox-epx,e.y+eoy-epy,5f*es,eyePaint)
-                canvas.drawCircle(e.x+eox+epx+cos(e.angle)*2f,e.y+eoy+epy+sin(e.angle)*2f,3f*es,pupilPaint)
-                canvas.drawCircle(e.x+eox-epx+cos(e.angle)*2f,e.y+eoy-epy+sin(e.angle)*2f,3f*es,pupilPaint)
-
+                if (isStunned) {
+                    canvas.drawCircle(e.x, e.y-r-22f, 8f, stunPaint)
+                    canvas.drawCircle(e.x-14f, e.y-r-18f, 5f, stunPaint)
+                    canvas.drawCircle(e.x+14f, e.y-r-18f, 5f, stunPaint)
+                }
                 if (!e.isBoss) {
-                    val bw=r*2.6f; val bh=7f; val bx=e.x-bw/2f; val by=e.y-r-18f
+                    val bw=r*2.8f; val bh=7f; val bx=e.x-bw/2f; val by=e.y-r-26f
                     canvas.drawRoundRect(bx,by,bx+bw,by+bh,3f,3f,hpBarBgPaint)
                     hpBarEnemyPaint.color=e.type.bodyColor
                     canvas.drawRoundRect(bx,by,bx+bw*(e.hp.toFloat()/e.type.maxHp),by+bh,3f,3f,hpBarEnemyPaint)
@@ -920,22 +1019,18 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
             }
 
             // ---- Player ----
-            canvas.drawOval(playerX-PLAYER_R*0.85f,playerY+PLAYER_R*0.55f,playerX+PLAYER_R*0.85f,playerY+PLAYER_R*0.95f,shadowPaint)
-            // Charge ring
             if (isCharging && chargeHeld > 0.1f) {
                 val chargeP = (chargeHeld / CHARGE_THRESH).coerceAtMost(1f)
                 playerChargePaint.alpha = (chargeP*200).toInt()
-                canvas.drawCircle(playerX,playerY,PLAYER_R+10f+chargeP*20f,playerChargePaint)
+                canvas.drawCircle(playerX, playerY, PLAYER_R+14f+chargeP*20f, playerChargePaint)
             }
-            canvas.drawCircle(playerX,playerY,PLAYER_R,playerBodyPaint)
-            canvas.drawCircle(playerX,playerY,PLAYER_R,playerStrokePaint)
-            canvas.drawCircle(playerX+cos(playerAngle)*(PLAYER_R-6f),playerY+sin(playerAngle)*(PLAYER_R-6f),7f,dirPaint)
-            val pex=cos(playerAngle)*PLAYER_R*0.38f; val pey=sin(playerAngle)*PLAYER_R*0.38f
-            val ppx=-sin(playerAngle)*PLAYER_R*0.28f; val ppy=cos(playerAngle)*PLAYER_R*0.28f
-            canvas.drawCircle(playerX+pex+ppx,playerY+pey+ppy,5f,eyePaint)
-            canvas.drawCircle(playerX+pex-ppx,playerY+pey-ppy,5f,eyePaint)
-            canvas.drawCircle(playerX+pex+ppx+cos(playerAngle)*2f,playerY+pey+ppy+sin(playerAngle)*2f,3f,pupilPaint)
-            canvas.drawCircle(playerX+pex-ppx+cos(playerAngle)*2f,playerY+pey-ppy+sin(playerAngle)*2f,3f,pupilPaint)
+            drawMinifig(canvas, playerX, playerY, PLAYER_R, playerAngle,
+                torsoTop  = figTorsoTopPaint,
+                torsoSide = figTorsoSidePaint,
+                headColor = Color.rgb(255,220,100),
+                legColor  = Color.rgb(35,35,35),
+                walkPhase = if (isMoving) walkCycle else 0f,
+                showShooterRing = false)
 
             for (d in dmgNums) { dmgTextPaint.color=d.color; dmgTextPaint.alpha=(d.life*255).toInt().coerceIn(0,255); canvas.drawText(d.text,d.x,d.y,dmgTextPaint) }
 
@@ -1030,6 +1125,107 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
     }
 
     // =========================================================================
+    // Minifig draw — isometric-feel 3D character
+    // cx/cy = feet position, r = scale radius, angle = facing direction
+    // =========================================================================
+    private fun drawMinifig(canvas: Canvas, cx: Float, cy: Float, r: Float, angle: Float,
+                             torsoTop: Paint, torsoSide: Paint,
+                             headColor: Int, legColor: Int,
+                             walkPhase: Float, showShooterRing: Boolean) {
+        val scale  = r / 26f
+        val bob    = if (walkPhase != 0f) sin(walkPhase) * 2.5f * scale else 0f
+        val armSwing = if (walkPhase != 0f) sin(walkPhase) * 8f * scale else 0f
+        val legSwing = if (walkPhase != 0f) sin(walkPhase) * 6f * scale else 0f
+
+        // Dimensions (top-down with perspective squash)
+        val tw = 20f * scale   // torso width
+        val th = 14f * scale   // torso height (squashed for perspective)
+        val td = 5f  * scale   // torso depth (side face)
+        val lw = 8f  * scale   // leg width
+        val lh = 8f  * scale   // leg height
+        val ld = 4f  * scale   // leg depth
+        val hr = 11f * scale   // head radius
+        val hd = 4f  * scale   // head depth
+
+        // Anchor: cy is the centre, we stack from bottom up
+        val legY    = cy + th/2f + lh/2f - bob
+        val torsoY  = cy - bob
+        val headY   = cy - th/2f - hr - 2f*scale - bob
+
+        // Ground shadow
+        canvas.drawOval(cx-tw*0.9f, cy+th/2f+ld, cx+tw*0.9f, cy+th/2f+ld+5f*scale, shadowPaint)
+
+        // ---- Legs ----
+        val lx1 = cx - lw * 0.7f; val lx2 = cx + lw * 0.7f
+        val leg1Offset = legSwing; val leg2Offset = -legSwing
+        // Leg side depth
+        mfLegSidePaint.color = darken(legColor, 0.55f)
+        mfLegTopPaint.color  = legColor
+        // Left leg
+        canvas.drawRect(lx1-lw/2f, legY-lh/2f+leg1Offset, lx1+lw/2f, legY+lh/2f+leg1Offset+ld, mfLegSidePaint)
+        canvas.drawRect(lx1-lw/2f, legY-lh/2f+leg1Offset, lx1+lw/2f, legY+lh/2f+leg1Offset, mfLegTopPaint)
+        // Right leg
+        canvas.drawRect(lx2-lw/2f, legY-lh/2f+leg2Offset, lx2+lw/2f, legY+lh/2f+leg2Offset+ld, mfLegSidePaint)
+        canvas.drawRect(lx2-lw/2f, legY-lh/2f+leg2Offset, lx2+lw/2f, legY+lh/2f+leg2Offset, mfLegTopPaint)
+
+        // ---- Arms ----
+        val ar = 5f*scale
+        val armColor = torsoTop.color
+        mfArmFillPaint.color = armColor
+        mfArmSidePaint.color = darken(armColor, 0.6f)
+        val arm1Y = torsoY + armSwing; val arm2Y = torsoY - armSwing
+        // Left arm
+        canvas.drawOval(cx-tw/2f-ar*1.8f, arm1Y-ar, cx-tw/2f, arm1Y+ar, mfArmFillPaint)
+        canvas.drawOval(cx-tw/2f-ar*1.8f, arm1Y-ar+ld, cx-tw/2f, arm1Y+ar+ld, mfArmSidePaint)
+        // Right arm
+        canvas.drawOval(cx+tw/2f, arm2Y-ar, cx+tw/2f+ar*1.8f, arm2Y+ar, mfArmFillPaint)
+        canvas.drawOval(cx+tw/2f, arm2Y-ar+ld, cx+tw/2f+ar*1.8f, arm2Y+ar+ld, mfArmSidePaint)
+
+        // ---- Torso ----
+        // Side face (depth)
+        canvas.drawRect(cx-tw/2f, torsoY+th/2f, cx+tw/2f, torsoY+th/2f+td, torsoSide)
+        // Top face
+        canvas.drawRoundRect(cx-tw/2f, torsoY-th/2f, cx+tw/2f, torsoY+th/2f, 3f*scale, 3f*scale, torsoTop)
+        // Outline
+        figOutlinePaint.strokeWidth = 2f*scale
+        canvas.drawRoundRect(cx-tw/2f, torsoY-th/2f, cx+tw/2f, torsoY+th/2f, 3f*scale, 3f*scale, figOutlinePaint)
+
+        // ---- Head ----
+        mfHeadFillPaint.color = headColor
+        mfHeadSidePaint.color = darken(headColor, 0.6f)
+        // Head depth
+        canvas.drawOval(cx-hr, headY+hr*0.7f, cx+hr, headY+hr*0.7f+hd*1.5f, mfHeadSidePaint)
+        // Head top
+        canvas.drawCircle(cx, headY, hr, mfHeadFillPaint)
+        canvas.drawCircle(cx, headY, hr, figOutlinePaint)
+        // Face — dots for eyes, curved smile, all relative to facing direction
+        val ex1 = cx + cos(angle - 0.4f) * hr * 0.55f
+        val ey1 = headY + sin(angle - 0.4f) * hr * 0.55f
+        val ex2 = cx + cos(angle + 0.4f) * hr * 0.55f
+        val ey2 = headY + sin(angle + 0.4f) * hr * 0.55f
+        canvas.drawCircle(ex1, ey1, 2.2f*scale, mfEyeDotPaint)
+        canvas.drawCircle(ex2, ey2, 2.2f*scale, mfEyeDotPaint)
+        // Smile arc — small arc centred between eyes, facing outward
+        val smileX = cx + cos(angle)*hr*0.3f
+        val smileY = headY + sin(angle)*hr*0.3f
+        val smileR = 4f*scale
+        figFacePaint.strokeWidth = 1.8f*scale
+        canvas.drawArc(smileX-smileR, smileY-smileR, smileX+smileR, smileY+smileR,
+            Math.toDegrees(angle.toDouble()).toFloat() + 30f, 120f, false, figFacePaint)
+
+        // Shooter ring
+        if (showShooterRing) {
+            mfShooterRingPaint.strokeWidth = 2f*scale
+            canvas.drawCircle(cx, cy, r+6f*scale, mfShooterRingPaint)
+        }
+    }
+
+    private fun darken(color: Int, factor: Float): Int = Color.rgb(
+        (Color.red(color)   * factor).toInt().coerceIn(0,255),
+        (Color.green(color) * factor).toInt().coerceIn(0,255),
+        (Color.blue(color)  * factor).toInt().coerceIn(0,255))
+
+    // =========================================================================
     // Draw helpers
     // =========================================================================
     private fun drawHeart(canvas: Canvas, cx: Float, cy: Float, r: Float) {
@@ -1052,10 +1248,13 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
 
     private fun drawKey(canvas: Canvas, cx: Float, cy: Float, scale: Float) {
         canvas.drawCircle(cx,cy-10f*scale,9f*scale,keyPaint)
-        val kp = Paint().apply{color=Color.rgb(200,160,30);style=Paint.Style.STROKE;strokeWidth=5f*scale;isAntiAlias=true}
-        canvas.drawCircle(cx,cy-10f*scale,9f*scale,kp)
-        canvas.drawLine(cx,cy,cx,cy+22f*scale,Paint().apply{color=Color.rgb(255,210,50);style=Paint.Style.STROKE;strokeWidth=5f*scale;isAntiAlias=true})
-        canvas.drawLine(cx,cy+14f*scale,cx+6f*scale,cy+14f*scale,Paint().apply{color=Color.rgb(255,210,50);style=Paint.Style.STROKE;strokeWidth=4f*scale;isAntiAlias=true})
+        keyRimPaint.strokeWidth = 5f*scale
+        canvas.drawCircle(cx,cy-10f*scale,9f*scale,keyRimPaint)
+        keyShaftPaint.strokeWidth = 5f*scale
+        canvas.drawLine(cx,cy,cx,cy+22f*scale,keyShaftPaint)
+        keyShaftPaint.strokeWidth = 4f*scale
+        canvas.drawLine(cx,cy+14f*scale,cx+6f*scale,cy+14f*scale,keyShaftPaint)
+        keyShaftPaint.strokeWidth = 5f*scale  // reset
     }
 
     private fun drawWeaponBtn(canvas: Canvas, weapon: Weapon, rect: RectF) {
