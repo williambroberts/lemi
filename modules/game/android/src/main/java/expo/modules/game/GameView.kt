@@ -66,7 +66,7 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
     // -------------------------------------------------------------------------
 
     private val bgPaint = Paint().apply {
-        color = Color.rgb(15, 15, 30)
+        color = Color.rgb(255, 181, 158)
         style = Paint.Style.FILL
     }
     private val playerFillPaint = Paint().apply {
@@ -217,7 +217,7 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
         worldHeight = height * 2.0 / SCALE
 
         val w  = World<Body>()
-        w.setGravity(Vector2(0.0, -50.0))
+        w.setGravity(Vector2(0.0, -200.0))
 
         val pw = worldWidth
         val ph = worldHeight
@@ -280,7 +280,7 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
         val p = Body()
         p.addFixture(Geometry.createCircle(0.25), 4.0, 0.3, 0.0)  // density 4.0 = heavy, friction 0.3
 p.setMass(MassType.NORMAL)
-p.setLinearDamping(15.0)   // high drag = stops quickly, precise control
+p.setLinearDamping(25.0)   // high drag = stops quickly, precise control
 p.setAngularDamping(1000.0)
 p.setAtRestDetectionEnabled(false)
         p.translate(pw / 2.0, 1.5)
@@ -350,8 +350,8 @@ p.setAtRestDetectionEnabled(false)
     // Update
     // =========================================================================
 
-    private val MOVE_FORCE   = 40.0   // high force needed to overcome the heavy density + damping
-private val JUMP_IMPULSE = 8.0    // needs more impulse to lift the heavier body
+    private val MOVE_FORCE  = 100.0   // high force needed to overcome the heavy density + damping
+private val JUMP_IMPULSE = 150.0    // needs more impulse to lift the heavier body
 
     private fun update(deltaSeconds: Double) {
         val w = world  ?: return
@@ -362,11 +362,13 @@ private val JUMP_IMPULSE = 8.0    // needs more impulse to lift the heavier body
             moveRight -> p.applyForce(Vector2( MOVE_FORCE, 0.0))
         }
 
-        if (doJump && onGround) {
-            doJump   = false
-            onGround = false
-            p.linearVelocity = Vector2(p.linearVelocity.x, 0.0)
-            p.applyImpulse(Vector2(0.0, JUMP_IMPULSE))
+        if (doJump) {
+            doJump = false
+            if (onGround) {
+                onGround = false
+                p.linearVelocity = Vector2(p.linearVelocity.x, 0.0)
+                p.applyImpulse(Vector2(0.0, JUMP_IMPULSE))
+            }
         }
 
         onGround = false
@@ -442,7 +444,7 @@ private val JUMP_IMPULSE = 8.0    // needs more impulse to lift the heavier body
 
                 // Grass strip on top of floating platforms
                 if (i > 0) {
-                    platformFillPaint.color = Color.rgb(80, 220, 100)
+                    platformFillPaint.color = Color.rgb(126, 52, 210)
                     canvas.drawRoundRect(cx-hw, cy-hh, cx+hw, cy-hh+6f, 3f, 3f, platformFillPaint)
                 }
             }
@@ -489,8 +491,8 @@ private val JUMP_IMPULSE = 8.0    // needs more impulse to lift the heavier body
             drawBtn(btnJump,  "▲", doJump)
 
             // Mini-map (top-right corner)
-            val mmW    = 160f
-            val mmH    = 100f
+            val mmW    = 260f
+            val mmH    = 200f
             val mmX    = surfaceWidth  - mmW - 20f
             val mmY    = 20f
             val scaleX = mmW / (worldWidth  * SCALE).toFloat()
