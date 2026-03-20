@@ -236,8 +236,9 @@ class GameState {
     val  playerX: Float get() = physics.playerGridX
     val  playerY: Float get() = physics.playerGridY
 
-    private var targetX   = LevelData.startX
-    private var targetY   = LevelData.startY
+    // Exposed so renderer can use target-based depth (fixes tile-over-player bug)
+    var targetX = LevelData.startX; private set
+    var targetY = LevelData.startY; private set
     private val MOVE_SPEED = 8.0   // grid cells per second
 
     init { physics.build() }
@@ -439,6 +440,7 @@ class IsoRenderer {
 
     fun renderWorld(
         canvas: Canvas, state: GameState,
+        targetX: Int, targetY: Int,
         ox: Float, oy: Float,
         sw: Float, sh: Float, t: Float
     ) {
@@ -488,7 +490,9 @@ class IsoRenderer {
         val pcx = isoX(ox, state.playerX, state.playerY)
         val pcy = isoY(oy, state.playerX, state.playerY)
         playerSlot.canvas = canvas; playerSlot.cx = pcx; playerSlot.cy = pcy
-        queue.add(state.playerX + state.playerY, playerSlot.fn)
+        // Depth based on TARGET tile (not current float pos) — ensures player
+        // always renders in front of the tile they're moving toward, not behind it.
+        queue.add(targetX.toFloat() + targetY.toFloat() + 0.8f, playerSlot.fn)
 
         queue.flush()
     }
@@ -710,7 +714,6 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
 
     private val renderer = IsoRenderer()
     private val state    = GameState()
-    private val swipe    = SwipeDetector(minDist = 25f)
 
     // Camera in grid space — smooth float, follows player
     private var camX = state.playerX
@@ -763,25 +766,42 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
         val tx = ev.x; val ty = ev.y
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                // Buttons suppress swipe
-                if (btnPrev.contains(tx, ty) || btnNext.contains(tx, ty)) {
-                    swipe.onUp(); return
-                }
-                swipe.onDown(tx, ty)
                 rippleX = tx; rippleY = ty; rippleT = 0f
-                if (state.won) { state.reset(); camX = state.playerX; camY = state.playerY }
-            }
-            MotionEvent.ACTION_MOVE -> {
-                when (swipe.onMove(tx, ty)) {
-                    SwipeDetector.Dir.EAST  -> state.move( 1,  0)
-                    SwipeDetector.Dir.WEST  -> state.move(-1,  0)
-                    SwipeDetector.Dir.SOUTH -> state.move( 0,  1)
-                    SwipeDetector.Dir.NORTH -> state.move( 0, -1)
-                    null -> Unit
+
+                if (btnPrev.contains(tx, ty) || btnNext.contains(tx, ty)) return
+
+                if (state.won) {
+                    state.reset(); camX = state.playerX; camY = state.playerY; return
                 }
+
+                // Direction = screen quadrant of tap relative to player's screen position.
+                //
+                // In isometric view, the four tile directions map to screen quadrants:
+                //   tap bottom-right of player  →  E  (gridX + 1)
+                //   tap bottom-left  of player  →  S  (gridY + 1)
+                //   tap top-right    of player  →  N  (gridY - 1)
+                //   tap top-left     of player  →  W  (gridX - 1)
+                //
+                // This matches user intuition: tapping visually below-left moves
+                // the player toward the bottom-left of the iso view.
+
+                val playerSx = isoX(ox(), state.playerX, state.playerY)
+                val playerSy = isoY(oy(), state.playerX, state.playerY)
+                val dx = tx - playerSx
+                val dy = ty - playerSy
+
+                if (abs(dx) < 8f && abs(dy) < 8f) return  // dead zone — ignore taps on player
+
+                val move = when {
+                    dx >= 0 && dy >= 0 -> Pair( 1,  0)   // bottom-right → E
+                    dx <  0 && dy >= 0 -> Pair( 0,  1)   // bottom-left  → S
+                    dx >= 0 && dy <  0 -> Pair( 0, -1)   // top-right    → N
+                    else               -> Pair(-1,  0)   // top-left     → W
+                }
+                state.move(move.first, move.second)
             }
             MotionEvent.ACTION_UP,
-            MotionEvent.ACTION_CANCEL -> swipe.onUp()
+            MotionEvent.ACTION_CANCEL -> { /* no-op */ }
         }
     }
 
@@ -831,7 +851,7 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
             canvas = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O)
                 holder.lockHardwareCanvas() else holder.lockCanvas()
             canvas ?: return
-            renderer.renderWorld(canvas, state, ox(), oy(), surfaceW, surfaceH, stateTime)
+            renderer.renderWorld(canvas, state, state.targetX, state.targetY, ox(), oy(), surfaceW, surfaceH, stateTime)
             renderer.renderHUD(canvas, surfaceW, surfaceH,
                 state.won, state.winTimer, LevelData.hint,
                 btnPrev, btnNext, rippleX, rippleY, rippleT)
