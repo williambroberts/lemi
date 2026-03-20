@@ -79,13 +79,13 @@ object LevelData {
     val grid: Array<Array<Tile>> = arrayOf(
         //        col 0   1     2     3     4     5     6     7
         arrayOf( W(),  W(),  W(),  W(),  W(),  W(),  W(),  W() ),  // row 0
-        arrayOf( W(),  G(),  G(),  G(),  B(),  G(),  G(),  W() ),  // row 1
-        arrayOf( W(),  G(),  B(),  G(),  G(),  G(),  B(),  W() ),  // row 2
+        arrayOf( W(),  G(),  G(),  G(),  G(),  G(),  G(),  W() ),  // row 1
+        arrayOf( W(),  G(),  B(),  G(),  G(),  B(),  G(),  W() ),  // row 2
         arrayOf( W(),  G(),  G(),  P(),  P(),  G(),  G(),  W() ),  // row 3
-        arrayOf( W(),  B(),  G(),  P(),  P(),  G(),  G(),  W() ),  // row 4
-        arrayOf( W(),  G(),  G(),  G(),  G(),  G(),  S(),  W() ),  // row 5
-        arrayOf( W(),  G(),  S(),  S(),  S(),  S(),  S(),  W() ),  // row 6
-        arrayOf( W(),  G(),  G(),  G(),  G(),  G(),  X(),  W() ),  // row 7
+        arrayOf( W(),  G(),  P(),  P(),  P(),  P(),  G(),  W() ),  // row 4
+        arrayOf( W(),  G(),  G(),  P(),  S(),  G(),  G(),  W() ),  // row 5
+        arrayOf( W(),  G(),  G(),  S(),  S(),  G(),  B(),  W() ),  // row 6
+        arrayOf( W(),  G(),  G(),  G(),  S(),  G(),  X(),  W() ),  // row 7
         arrayOf( W(),  W(),  W(),  W(),  W(),  W(),  W(),  W() ),  // row 8
     )
     val cols:   Int    = grid[0].size           // 8
@@ -714,6 +714,7 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
 
     private val renderer = IsoRenderer()
     private val state    = GameState()
+    @Volatile private var pendingReset = false
 
     // Camera in grid space — smooth float, follows player
     private var camX = state.playerX
@@ -750,11 +751,14 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
         val bm = 16f; val bw = 52f; val bh = 40f
         btnPrev.set(bm,            surfaceH - bh - bm, bm + bw,            surfaceH - bm)
         btnNext.set(surfaceW-bm-bw, surfaceH - bh - bm, surfaceW - bm, surfaceH - bm)
-        // Centre the full grid on screen
-        val midC = LevelData.cols / 2f
-        val midR = LevelData.rows / 2f
-        baseOx = surfaceW / 2f - isoX(0f, midC, midR)
-        baseOy = surfaceH * 0.40f - isoY(0f, midC, midR)
+        // Anchor origin so the player start position appears near screen centre.
+        // When camX=startX, camY=startY:
+        //   ox() = baseOx + (startY - startX)*HALF_W  should equal surfaceW*0.45
+        //   oy() = baseOy - (startX + startY)*HALF_H  should equal surfaceH*0.42
+        val sx = LevelData.startX.toFloat()
+        val sy = LevelData.startY.toFloat()
+        baseOx = surfaceW * 0.45f - (sy - sx) * HALF_W
+        baseOy = surfaceH * 0.42f + (sx + sy) * HALF_H
     }
 
     override fun surfaceDestroyed(h: SurfaceHolder) {
@@ -770,9 +774,7 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
 
                 if (btnPrev.contains(tx, ty) || btnNext.contains(tx, ty)) return
 
-                if (state.won) {
-                    state.reset(); camX = state.playerX; camY = state.playerY; return
-                }
+                if (state.won) { pendingReset = true; return }
 
                 // Direction = screen quadrant of tap relative to player's screen position.
                 //
@@ -836,6 +838,12 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
     }
 
     private fun update(dt: Float) {
+        // Drain pending reset on the game loop thread — safe before physics step
+        if (pendingReset) {
+            pendingReset = false
+            state.reset()
+            camX = state.playerX; camY = state.playerY
+        }
         stateTime += dt
         if (rippleT >= 0f) { rippleT += dt; if (rippleT > 0.4f) rippleT = -1f }
         state.update(dt)
@@ -863,5 +871,5 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
     override fun onDetachedFromWindow() { stopLoop(); super.onDetachedFromWindow() }
     fun pause()  { isRunning = false }
     fun resume() { if (surfaceReady) startLoop() }
-    fun reset()  { state.reset(); camX = state.playerX; camY = state.playerY }
+    fun reset()  { pendingReset = true }
 }
