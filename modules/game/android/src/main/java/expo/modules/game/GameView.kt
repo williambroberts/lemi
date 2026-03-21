@@ -48,9 +48,9 @@ import kotlin.math.*
 // ═════════════════════════════════════════════════════════════════════════════
 
 // ── Projection constants ──────────────────────────────────────────────────────
-private const val HALF_W = 24f
-private const val HALF_H = 12f
-private const val SIDE_H =  6f
+private const val HALF_W = 36f
+private const val HALF_H = 18f
+private const val SIDE_H =  9f
 private const val TILE   = 40f
 
 // ── ISO projection — forward ──────────────────────────────────────────────────
