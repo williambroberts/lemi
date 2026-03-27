@@ -50,7 +50,7 @@ import kotlin.math.*
 // ── Projection constants ──────────────────────────────────────────────────────
 private const val HALF_W = 36f
 private const val HALF_H = 18f
-private const val SIDE_H =  9f
+private const val SIDE_H = 18f
 private const val TILE   = 40f
 private const val HEIGHT_OFFSET = 20f  // Pixels per height level
 
@@ -77,8 +77,8 @@ private fun tdScreenToRow(sy: Float, oy: Float) = (sy - oy) / TILE
 //  LAYER 1 — GRID DATA
 // ═════════════════════════════════════════════════════════════════════════════
 
-enum class TileType   { GRASS, SAND, STONE, WATER }
-enum class ObjectType { BLOCKER, GOAL, WINDMILL, NONE }
+enum class TileType   { GRASS, SAND, STONE, WATER, TELEPORT, BARRIER }
+enum class ObjectType { BLOCKER, GOAL, NONE }
 
 data class Tile(
     val type:       TileType   = TileType.GRASS,
@@ -91,10 +91,11 @@ data class Tile(
 private fun G(h: Int = 0) = Tile(TileType.GRASS, height = h)
 private fun S(h: Int = 0) = Tile(TileType.SAND, height = h)
 private fun P(h: Int = 0) = Tile(TileType.STONE, height = h)
+private fun T(h: Int = 0) = Tile(TileType.TELEPORT, height = h)
+private fun K(h: Int = 0) = Tile(TileType.BARRIER, height = h) // K for Barrier
 private fun W(h: Int = 0) = Tile(TileType.WATER,  ObjectType.NONE,    isWalkable = false, height = h)
 private fun B(h: Int = 0) = Tile(TileType.GRASS,  ObjectType.BLOCKER, isWalkable = false, height = h)
 private fun X(h: Int = 0) = Tile(TileType.STONE,  ObjectType.GOAL,    isGoal     = true,  height = h)
-private fun M(h: Int = 0) = Tile(TileType.GRASS,  ObjectType.WINDMILL, isWalkable = true, height = h)
 
 object LevelData {
     val grid: Array<Array<Tile>> = arrayOf(
@@ -104,12 +105,12 @@ object LevelData {
         arrayOf( W(),   G(0),  B(0),  G(0),  G(1),  G(1),  G(1),  W(),   W(),   W(),   W(),   W()   ), // 2
         arrayOf( W(),   G(0),  G(0),  G(1),  G(1),  P(2),  G(1),  G(1),  W(),   W(),   W(),   W()   ), // 3
         arrayOf( W(),   W(),   G(1),  G(1),  P(2),  P(2),  P(2),  G(1),  G(1),  W(),   W(),   W()   ), // 4
-        arrayOf( W(),   W(),   G(1),  P(2),  P(2),  M(3),  P(2),  P(2),  G(1),  G(1),  W(),   W()   ), // 5
-        arrayOf( W(),   W(),   G(1),  P(2),  P(3),  P(3),  P(3),  P(2),  G(1),  G(1),  W(),   W()   ), // 6
+        arrayOf( W(),   W(),   G(1),  P(2),  P(2),  T(3),  P(2),  P(2),  G(1),  G(1),  W(),   W()   ), // 5 - Teleport A
+        arrayOf( W(),   W(),   G(1),  P(2),  K(3),  P(3),  K(3),  P(2),  G(1),  G(1),  W(),   W()   ), // 6 - Barriers
         arrayOf( W(),   W(),   G(1),  P(2),  P(3),  X(4),  P(3),  P(2),  G(1),  G(0),  G(0),  W()   ), // 7 - Goal at H4
-        arrayOf( W(),   W(),   G(1),  P(2),  P(3),  P(3),  P(3),  P(2),  G(1),  G(0),  B(0),  W()   ), // 8
+        arrayOf( W(),   W(),   G(1),  P(2),  K(3),  P(3),  K(3),  P(2),  G(1),  G(0),  B(0),  W()   ), // 8 - Barriers
         arrayOf( W(),   W(),   G(1),  G(1),  P(2),  P(2),  P(2),  G(1),  G(1),  G(0),  G(0),  W()   ), // 9
-        arrayOf( W(),   W(),   W(),   G(1),  G(1),  G(1),  G(1),  G(1),  G(0),  G(0),  G(0),  W()   ), // 10
+        arrayOf( W(),   W(),   W(),   G(1),  G(1),  T(1),  G(1),  G(1),  G(0),  G(0),  G(0),  W()   ), // 10 - Teleport B
         arrayOf( W(),   W(),   W(),   W(),   W(),   W(),   W(),   W(),   W(),   W(),   W(),   W()   ), // 11
     )
     val cols   = grid[0].size
@@ -129,6 +130,15 @@ object LevelData {
         }
         goalX = gx; goalY = gy
     }
+
+    fun findOtherTeleport(currentC: Int, currentR: Int): Pair<Int, Int>? {
+        for (r in grid.indices) for (c in grid[r].indices) {
+            if (grid[r][c].type == TileType.TELEPORT && (c != currentC || r != currentR)) {
+                return Pair(c, r)
+            }
+        }
+        return null
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -140,13 +150,13 @@ private object Theme {
     val grassTop = Color.rgb(95,  145,  68);  val grassL   = Color.rgb(68,  108,  46);  val grassR = Color.rgb(55,  92, 36)
     val sandTop  = Color.rgb(200, 175, 120);  val sandL    = Color.rgb(162, 138,  85);  val sandR  = Color.rgb(142,120, 68)
     val stoneTop = Color.rgb(142, 136, 126);  val stoneL   = Color.rgb(102,  98,  90);  val stoneR = Color.rgb( 86, 84, 78)
+    val teleportTop = Color.rgb(180, 100, 255); val teleportL = Color.rgb(140, 70, 210); val teleportR = Color.rgb(110, 50, 180)
+    val barrierTop = Color.rgb(220, 60, 60); val barrierL = Color.rgb(170, 40, 40); val barrierR = Color.rgb(130, 30, 30)
     val water    = Color.rgb( 55, 120, 178)
     val blocker  = Color.rgb(185,  80,  65);  val blockerL = Color.rgb(140,  55,  42);  val blockerR = Color.rgb(118, 45, 35)
     val goal     = Color.rgb(255, 210,  50);  val goalGlow = Color.argb(60, 255, 210, 50)
     val player   = Color.rgb( 50, 200, 205);  val playerL  = Color.rgb( 35, 137, 150)
     val shadow   = Color.argb(45, 0, 0, 0);   val edge     = Color.argb(48, 0, 0, 0)
-    val millBody = Color.rgb(200, 190, 170);  val millBodyL = Color.rgb(160, 150, 135);  val millBodyR = Color.rgb(140, 130, 115)
-    val millRoof = Color.rgb(180,  80,  60);  val millBlade = Color.rgb(220, 210, 190)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -191,11 +201,22 @@ class GameState {
     private val LERP_SPEED = 8f
     private val JUMP_DURATION = 0.35f
     
+    var stateTime = 0f; private set
+    private var teleportLocked = false // Prevents re-triggering until moving off the tile
+
     init { 
         physics.build()
         val startTile = LevelData.tile(LevelData.startX, LevelData.startY)
         targetHeight = startTile?.height ?: 0
         playerHeight = targetHeight.toFloat()
+    }
+
+    fun getBarrierHeight(col: Int, row: Int): Float {
+        val tile = LevelData.tile(col, row)
+        if (tile?.type != TileType.BARRIER) return 0f
+        // Moves between 0 and 1.5 height units over a 3s period
+        val offset = (sin(stateTime * 2f + (col + row)) + 1f) * 0.75f
+        return tile.height.toFloat() + offset
     }
 
     fun move(dc: Int, dr: Int, shouldJump: Boolean = false) {
@@ -207,43 +228,45 @@ class GameState {
         
         if (!destTile.isWalkable) return
         
-        val currentH = targetHeight
-        val destH = destTile.height
+        val currentH = targetHeight.toFloat()
+        val destH = if (destTile.type == TileType.BARRIER) getBarrierHeight(nc, nr) else destTile.height.toFloat()
         val heightDiff = destH - currentH
         
+        // If it's a barrier and it's currently too high, we can't move onto it
+        if (destTile.type == TileType.BARRIER && heightDiff > 1.2f && !shouldJump) return
+        if (destTile.type == TileType.BARRIER && heightDiff > 2.0f && shouldJump) return
+
         when {
-            heightDiff == 0 -> {
+            abs(heightDiff) < 0.2f -> {
                 targetCol = nc
                 targetRow = nr
+                targetHeight = destH.toInt()
                 if (shouldJump) {
                     isJumping = true
                     jumpProgress = 0f
                 }
             }
-            heightDiff == 1 && shouldJump -> {
+            heightDiff > 0 && heightDiff <= 1.2f && shouldJump -> {
                 targetCol = nc
                 targetRow = nr
-                targetHeight = destH
+                targetHeight = destH.toInt()
                 isJumping = true
                 jumpProgress = 0f
             }
             heightDiff < 0 -> {
-                // Moving down: trigger a "drop" jump only if explicitly requested or height diff is large.
-                // For normal walking down, we just update target and let lerp handle it.
                 targetCol = nc
                 targetRow = nr
-                targetHeight = destH
-                if (shouldJump || heightDiff < -1) {
+                targetHeight = destH.toInt()
+                if (shouldJump || heightDiff < -1.2f) {
                     isJumping = true
                     jumpProgress = 0f
                 }
             }
-            heightDiff > 1 && shouldJump -> return
-            heightDiff > 0 && !shouldJump -> return
         }
     }
 
     fun update(dt: Float) {
+        stateTime += dt
         if (won) { winTimer += dt; return }
         physics.step(dt.toDouble())
         
@@ -252,21 +275,29 @@ class GameState {
             if (jumpProgress >= 1f) {
                 jumpProgress = 1f
                 isJumping = false
-                playerHeight = targetHeight.toFloat()
+                val finalTile = LevelData.tile(targetCol, targetRow)
+                playerHeight = if (finalTile?.type == TileType.BARRIER) getBarrierHeight(targetCol, targetRow) else targetHeight.toFloat()
+                checkTeleport()
             } else {
                 val horizT = jumpProgress
                 playerCol = prevTargetCol + (targetCol - prevTargetCol) * horizT
                 playerRow = prevTargetRow + (targetRow - prevTargetRow) * horizT
                 
                 val arcHeight = sin(jumpProgress * PI.toFloat()) * 0.8f
-                val startH = LevelData.tile(prevTargetCol, prevTargetRow)?.height?.toFloat() ?: 0f
-                val endH = targetHeight.toFloat()
+                val startH = LevelData.tile(prevTargetCol, prevTargetRow)?.let { 
+                    if (it.type == TileType.BARRIER) getBarrierHeight(prevTargetCol, prevTargetRow) else it.height.toFloat()
+                } ?: 0f
+                val endH = LevelData.tile(targetCol, targetRow)?.let {
+                    if (it.type == TileType.BARRIER) getBarrierHeight(targetCol, targetRow) else it.height.toFloat()
+                } ?: 0f
                 playerHeight = startH + (endH - startH) * jumpProgress + arcHeight
             }
         } else {
             val tc = targetCol.toFloat()
             val tr = targetRow.toFloat()
-            val th = targetHeight.toFloat()
+            val currentTile = LevelData.tile(targetCol, targetRow)
+            val th = if (currentTile?.type == TileType.BARRIER) getBarrierHeight(targetCol, targetRow) else targetHeight.toFloat()
+            
             val ddx = tc - playerCol
             val ddy = tr - playerRow
             val ddh = th - playerHeight
@@ -284,9 +315,11 @@ class GameState {
                 prevTargetCol = targetCol
                 prevTargetRow = targetRow
                 
+                if (checkTeleport()) return
+
                 if (targetCol == LevelData.goalX && targetRow == LevelData.goalY) {
                     val goalTile = LevelData.tile(targetCol, targetRow)
-                    if (targetHeight == goalTile?.height) {
+                    if (abs(playerHeight - (goalTile?.height ?: 0)) < 0.5f) {
                         won = true
                     }
                 }
@@ -294,8 +327,47 @@ class GameState {
         }
     }
 
+    private fun checkTeleport(): Boolean {
+        val currentTile = LevelData.tile(targetCol, targetRow)
+        
+        // If we're not on a teleport tile, unlock it for the next time
+        if (currentTile?.type != TileType.TELEPORT) {
+            teleportLocked = false
+            return false
+        }
+        
+        // If we're on a teleport tile but it's locked, don't trigger again
+        if (teleportLocked) return false
+
+        val other = LevelData.findOtherTeleport(targetCol, targetRow)
+        if (other != null) {
+            // Instantly snap all state variables to the destination
+            targetCol = other.first
+            targetRow = other.second
+            prevTargetCol = other.first
+            prevTargetRow = other.second
+            
+            val destTile = LevelData.tile(targetCol, targetRow)
+            targetHeight = destTile?.height ?: 0
+            
+            playerCol = targetCol.toFloat()
+            playerRow = targetRow.toFloat()
+            playerHeight = targetHeight.toFloat()
+            
+            // Reset movement states to ensure no "ghost" transitions
+            isJumping = false
+            jumpProgress = 0f
+            
+            // Lock teleport until we move to a non-teleport tile
+            teleportLocked = true
+            
+            return true
+        }
+        return false
+    }
+
     fun reset() {
-        won = false;  winTimer = 0f
+        won = false;  winTimer = 0f; stateTime = 0f
         targetCol = LevelData.startX;      targetRow = LevelData.startY
         prevTargetCol = LevelData.startX;  prevTargetRow = LevelData.startY
         playerCol = LevelData.startX.toFloat()
@@ -305,6 +377,7 @@ class GameState {
         playerHeight = targetHeight.toFloat()
         isJumping = false
         jumpProgress = 0f
+        teleportLocked = false
         physics.build()
     }
 }
@@ -367,10 +440,8 @@ class IsoRenderer {
     private val bEdgeP   = Paint().apply { style = Paint.Style.STROKE; strokeWidth = 1.5f; isAntiAlias = true }
     private val bTextP   = Paint().apply { textAlign = Paint.Align.CENTER; isAntiAlias = true; typeface = Typeface.DEFAULT_BOLD }
     private val rippleP  = Paint().apply { style = Paint.Style.STROKE; strokeWidth = 2f; isAntiAlias = true }
-    private val bladeP   = Paint().apply { style = Paint.Style.FILL;   isAntiAlias = true }
 
     private val topPath = Path();  private val sideL = Path();  private val sideR = Path()
-    private val bladePath = Path()
     private val queue   = DrawCallQueue(512)
 
     private var cachedSky: LinearGradient? = null;  private var cSkySh = 0f
@@ -409,7 +480,7 @@ class IsoRenderer {
             
             for (r in 0 until LevelData.rows) for (c in 0 until LevelData.cols) {
                 val tile = LevelData.tile(c, r) ?: continue
-                val h = tile.height.toFloat()
+                val h = if (tile.type == TileType.BARRIER) state.getBarrierHeight(c, r) else tile.height.toFloat()
                 val rc: Float; val rr: Float
                 when (rotation % 4) {
                     1 -> { rc = r.toFloat(); rr = (LevelData.cols - 1 - c).toFloat() }
@@ -428,23 +499,23 @@ class IsoRenderer {
                     s.cTop = when(tile.type) {
                         TileType.GRASS -> Theme.grassTop; TileType.SAND -> Theme.sandTop
                         TileType.STONE -> Theme.stoneTop; TileType.WATER -> Theme.water
+                        TileType.TELEPORT -> Theme.teleportTop; TileType.BARRIER -> Theme.barrierTop
                     }
                     s.cL = when(tile.type) {
                         TileType.GRASS -> Theme.grassL; TileType.SAND -> Theme.sandL
                         TileType.STONE -> Theme.stoneL; TileType.WATER -> Theme.water
+                        TileType.TELEPORT -> Theme.teleportL; TileType.BARRIER -> Theme.barrierL
                     }
                     s.cR = when(tile.type) {
                         TileType.GRASS -> Theme.grassR; TileType.SAND -> Theme.sandR
                         TileType.STONE -> Theme.stoneR; TileType.WATER -> Theme.water
+                        TileType.TELEPORT -> Theme.teleportR; TileType.BARRIER -> Theme.barrierR
                     }
-                    // Depth key for tiles: (rc + rr) is the primary sort.
-                    // We add (h * 0.01f) so that higher tiles at the same (rc, rr) are drawn later.
                     queue.add(rc + rr + h * 0.01f, s.fn)
                 }
                 if (tile.obj != ObjectType.NONE && oi < objPool.size) {
                     val s = objPool[oi++]
                     s.canvas=canvas; s.cx=cx; s.cy=cy; s.obj=tile.obj; s.t=t
-                    // Objects are drawn after the tile they sit on.
                     queue.add(rc + rr + h * 0.01f + 0.005f, s.fn)
                 }
             }
@@ -458,15 +529,8 @@ class IsoRenderer {
             playerSlot.canvas=canvas; playerSlot.iso=true
             playerSlot.cx = isoX(ox, prc+0.5f, prr+0.5f)
             playerSlot.cy = isoY(oy, prc+0.5f, prr+0.5f, state.playerHeight)
-            
-            // REFINED DEPTH SORTING FOR MOVEMENT:
-            // We use the player's real-time interpolated position (prc, prr) for the depth key.
-            // To ensure the player stays behind foreground tiles during movement, we use
-            // (prc + prr + 0.5) as the base key. This places the player's depth at the 
-            // visual center of the tile they are currently over.
-            // The (state.playerHeight * 0.01f) ensures they are hidden by higher tiles in front.
-            queue.add(prc + prr + 0.5f + state.playerHeight * 0.01f, playerSlot.fn)
-            
+            // Restore the +0.5f depth offset to ensure the player is drawn after the tile they are over
+            queue.add(prc + prr + 0.5f + state.playerHeight * 0.01f + 0.005f, playerSlot.fn)
             queue.flush()
         } else {
             canvas.drawColor(Color.rgb(40,45,50))
@@ -477,6 +541,7 @@ class IsoRenderer {
                     tile.isGoal -> Theme.goal; tile.obj == ObjectType.BLOCKER -> Theme.blocker
                     tile.type == TileType.WATER -> Theme.water; tile.type == TileType.GRASS -> Theme.grassTop
                     tile.type == TileType.SAND -> Theme.sandTop; tile.type == TileType.STONE -> Theme.stoneTop
+                    tile.type == TileType.TELEPORT -> Theme.teleportTop; tile.type == TileType.BARRIER -> Theme.barrierTop
                     else -> Color.DKGRAY
                 }
                 canvas.drawRect(x, y, x+TILE, y+TILE, fillP)
@@ -559,9 +624,6 @@ class IsoRenderer {
                 sideR.reset(); sideR.moveTo(cx,base-h+HALF_H); sideR.lineTo(cx+HALF_W,base-h); sideR.lineTo(cx+HALF_W,base); sideR.lineTo(cx,base+HALF_H); sideR.close()
                 objRP.color=Theme.blockerR; canvas.drawPath(sideR,objRP); canvas.drawPath(sideR,edgeP)
             }
-            ObjectType.WINDMILL -> {
-                drawWindmill(canvas, cx, base, t)
-            }
             ObjectType.GOAL -> {
                 val pulse = 1f + 0.15f * sin(t*3f)
                 canvas.drawCircle(cx, base-20f, 30f*pulse, glowP)
@@ -571,43 +633,6 @@ class IsoRenderer {
             }
             ObjectType.NONE -> Unit
         }
-    }
-
-    private fun drawWindmill(canvas: Canvas, cx: Float, base: Float, t: Float) {
-        for (level in 0..3) {
-            val h = level * 12f
-            val scale = 1f - level * 0.10f
-            val hw = HALF_W * 0.45f * scale
-            val hh = HALF_H * 0.45f * scale
-            topPath.reset(); topPath.moveTo(cx, base - h - 12f - hh); topPath.lineTo(cx + hw, base - h - 12f); topPath.lineTo(cx, base - h - 12f + hh); topPath.lineTo(cx - hw, base - h - 12f); topPath.close()
-            objTP.color = Theme.millBody; canvas.drawPath(topPath, objTP); canvas.drawPath(topPath, edgeP)
-            sideL.reset(); sideL.moveTo(cx - hw, base - h - 12f); sideL.lineTo(cx, base - h - 12f + hh); sideL.lineTo(cx, base - h + hh); sideL.lineTo(cx - hw, base - h); sideL.close()
-            objLP.color = Theme.millBodyL; canvas.drawPath(sideL, objLP); canvas.drawPath(sideL, edgeP)
-            sideR.reset(); sideR.moveTo(cx, base - h - 12f + hh); sideR.lineTo(cx + hw, base - h - 12f); sideR.lineTo(cx + hw, base - h); sideR.lineTo(cx, base - h + hh); sideR.close()
-            objRP.color = Theme.millBodyR; canvas.drawPath(sideR, objRP); canvas.drawPath(sideR, edgeP)
-        }
-        val roofBase = base - 48f
-        topPath.reset(); topPath.moveTo(cx, roofBase - 16f); topPath.lineTo(cx + HALF_W * 0.35f, roofBase); topPath.lineTo(cx, roofBase + HALF_H * 0.2f); topPath.lineTo(cx - HALF_W * 0.35f, roofBase); topPath.close()
-        objTP.color = Theme.millRoof; canvas.drawPath(topPath, objTP)
-        val bladeAngle = t * 1.2f; val bladeCenter = roofBase - 8f
-        for (i in 0..3) {
-            val angle = bladeAngle + i * PI.toFloat() / 2f
-            drawBlade(canvas, cx, bladeCenter, angle)
-        }
-    }
-
-    private fun drawBlade(canvas: Canvas, cx: Float, cy: Float, angle: Float) {
-        val len = 28f; val width = 6f
-        val endX = cos(angle) * len; val endY = sin(angle) * len * 0.5f
-        bladePath.reset()
-        val nearPerp = angle + PI.toFloat() / 2f; val nearW = width * 0.3f
-        bladePath.moveTo(cx + cos(nearPerp) * nearW, cy + sin(nearPerp) * nearW * 0.5f)
-        bladePath.lineTo(cx - cos(nearPerp) * nearW, cy - sin(nearPerp) * nearW * 0.5f)
-        val farW = width
-        bladePath.lineTo(cx + endX - cos(nearPerp) * farW, cy + endY - sin(nearPerp) * farW * 0.5f)
-        bladePath.lineTo(cx + endX + cos(nearPerp) * farW, cy + endY + sin(nearPerp) * farW * 0.5f)
-        bladePath.close()
-        bladeP.color = Theme.millBlade; canvas.drawPath(bladePath, bladeP); canvas.drawPath(bladePath, edgeP)
     }
 
     private fun drawIsoPlayer(canvas: Canvas, cx: Float, cy: Float) {
@@ -667,7 +692,6 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
     private fun ox() = if (isIso) isoOx else tdOx
     private fun oy() = if (isIso) isoOy else tdOy
 
-    private var stateTime = 0f
     private var rippleX = 0f;  private var rippleY = 0f;  private var rippleT = -1f
     private val btnView = RectF(); private val btnRotL = RectF(); private val btnRotR = RectF()
 
@@ -716,10 +740,8 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
                 
                 val moveDc: Int; val moveDr: Int
                 if (dist > SWIPE_THRESHOLD) {
-                    // Swipe detected -> Determine direction from swipe vector
                     val swipeCol = (dx / HALF_W + dy / HALF_H) * 0.5f
                     val swipeRow = (dy / HALF_H - dx / HALF_W) * 0.5f
-                    
                     if (abs(swipeCol) > abs(swipeRow)) {
                         moveDc = if(swipeCol > 0) 1 else -1; moveDr = 0
                     } else {
@@ -727,7 +749,6 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
                     }
                     pendingJump = true
                 } else {
-                    // Tap detected -> Determine direction from tap location relative to player
                     val tapCol: Float; val tapRow: Float
                     if (isIso) {
                         tapCol = isoScreenToCol(startX, startY, ox(), oy())
@@ -736,8 +757,6 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
                         tapCol = tdScreenToCol(startX, ox())
                         tapRow = tdScreenToRow(startY, oy())
                     }
-
-                    // Adjust tap coordinates based on rotation
                     val finalCol: Float; val finalRow: Float
                     when (rotation % 4) {
                         1 -> { finalCol = (LevelData.cols - 1 - tapRow); finalRow = tapCol }
@@ -745,17 +764,13 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
                         3 -> { finalCol = tapRow; finalRow = (LevelData.rows - 1 - tapCol) }
                         else -> { finalCol = tapCol; finalRow = tapRow }
                     }
-
                     val dCol = finalCol - state.targetCol
                     val dRow = finalRow - state.targetRow
                     if (abs(dCol) < 0.25f && abs(dRow) < 0.25f) return
-
                     if (abs(dCol) > abs(dRow)) { moveDc = if(dCol > 0f) 1 else -1; moveDr = 0 }
                     else                       { moveDc = 0; moveDr = if(dRow > 0f) 1 else -1 }
                     pendingJump = false
                 }
-
-                // Adjust for rotation
                 val finalDc: Int; val finalDr: Int
                 when (rotation % 4) {
                     1 -> { finalDc = -moveDr; finalDr = moveDc }
@@ -763,7 +778,6 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
                     3 -> { finalDc = moveDr; finalDr = -moveDc }
                     else -> { finalDc = moveDc; finalDr = moveDr }
                 }
-                
                 pendingDc = finalDc; pendingDr = finalDr; hasPending = true
             }
         }
@@ -796,7 +810,6 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
             hasPending=false
             state.move(pendingDc, pendingDr, pendingJump)
         }
-        stateTime+=dt
         if (rippleT>=0f) { rippleT+=dt; if(rippleT>0.4f) rippleT=-1f }
         state.update(dt)
     }
@@ -807,7 +820,7 @@ class GameInternalsView(context: Context, appContext: AppContext) : ExpoView(con
             canvas = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O)
                 holder.lockHardwareCanvas() else holder.lockCanvas()
             canvas ?: return
-            renderer.renderWorld(canvas, state, ox(), oy(), surfaceW, surfaceH, stateTime, isIso, rotation)
+            renderer.renderWorld(canvas, state, ox(), oy(), surfaceW, surfaceH, state.stateTime, isIso, rotation)
             renderer.renderHUD(canvas, surfaceW, surfaceH,
                 state.won, state.winTimer, LevelData.hint,
                 btnView, btnRotL, btnRotR, isIso, rippleX, rippleY, rippleT)
