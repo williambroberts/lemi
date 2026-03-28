@@ -387,40 +387,44 @@ class GameState {
     }
 
     // ── Build mechanic ────────────────────────────────────────────────────────
-    // Called from the UI thread via pendingBuild; executed on the game-loop thread.
+    // playerH  = the height the player is currently standing at (targetHeight,
+    //            which already reflects built tiles the player may be on top of).
+    //
+    // Rules for the adjacent cell:
+    //   · void (no level tile, no built tile) → place at playerH
+    //   · existing height <  playerH          → place at playerH   (raise to match)
+    //   · existing height == playerH          → place at playerH+1 (raise by one)
+    //   · existing height >  playerH          → do nothing (already higher)
+    //
+    // "existing height" = builtTile height if present, otherwise level tile height.
+    // A built tile always wins over the level tile beneath it.
     fun build(dc: Int, dr: Int) {
-        val nc = targetCol + dc
-        val nr = targetRow + dr
+        val nc    = targetCol + dc
+        val nr    = targetRow + dr
         val level = LevelManager.currentLevel
 
-        // Do not build outside grid bounds
         if (!level.isInBounds(nc, nr)) return
 
-        val playerTileHeight = level.tile(targetCol, targetRow)?.height ?: targetHeight
-        val targetBuildHeight = playerTileHeight // place at player's ground level for voids
+        val playerH = targetHeight          // height player is standing on
+        val key     = Pair(nc, nr)
 
-        val key = Pair(nc, nr)
+        // Resolve current height of the adjacent cell (overlay wins)
         val existingBuilt = builtTiles[key]
         val levelTile     = level.tile(nc, nr)
-
-        when {
-            // Cell is completely void (null in level, no built tile) → place at player height
-            levelTile == null && existingBuilt == null -> {
-                builtTiles[key] = BuiltTile(targetBuildHeight)
-            }
-            // Cell has a built tile already at or above player height + 1 → do nothing
-            existingBuilt != null && existingBuilt.height >= playerTileHeight + 1 -> return
-            // Cell has a built tile below threshold → raise it
-            existingBuilt != null -> {
-                builtTiles[key] = BuiltTile(playerTileHeight + 1)
-            }
-            // Cell is a level tile at or above player height + 1 → do nothing
-            levelTile != null && levelTile.height >= playerTileHeight + 1 -> return
-            // Cell is a level tile below threshold → add a built overlay raised by 1
-            levelTile != null -> {
-                builtTiles[key] = BuiltTile(playerTileHeight + 1)
-            }
+        val currentH: Int? = when {
+            existingBuilt != null -> existingBuilt.height
+            levelTile     != null -> levelTile.height
+            else                  -> null   // void
         }
+
+        val newH: Int = when {
+            currentH == null    -> playerH      // void → bridge at player height
+            currentH < playerH  -> playerH      // below player → raise to match
+            currentH == playerH -> playerH + 1  // same level → raise by one
+            else                -> return       // already higher → do nothing
+        }
+
+        builtTiles[key] = BuiltTile(newH)
     }
 
     // ── Movement ──────────────────────────────────────────────────────────────
