@@ -62,12 +62,28 @@ import kotlin.math.*
 //      player tile height + 1
 // ═════════════════════════════════════════════════════════════════════════════
 
-// ── Projection constants ──────────────────────────────────────────────────────
-private const val HALF_W       = 36f
-private const val HALF_H       = 18f
-private const val SIDE_H       = 18f
-private const val TILE         = 40f
-private const val HEIGHT_OFFSET = 20f   // pixels per height level
+// ── Projection base constants (unscaled) ─────────────────────────────────────
+// All projection functions take the current scale via a Projection object so
+// zoom applies uniformly without touching game logic or renderer internals.
+private const val BASE_HALF_W       = 36f
+private const val BASE_HALF_H       = 18f
+private const val BASE_SIDE_H       = 18f
+private const val BASE_TILE         = 40f
+private const val BASE_HEIGHT_OFFSET = 20f
+
+// ── Scaled projection values — computed from BASE_* × zoom ───────────────────
+// Held as top-level vars so they read exactly like the old constants everywhere.
+// Updated by GameInternalsView.applyZoom() whenever the zoom level changes.
+private var HALF_W        = BASE_HALF_W
+private var HALF_H        = BASE_HALF_H
+private var SIDE_H        = BASE_SIDE_H
+private var TILE          = BASE_TILE
+private var HEIGHT_OFFSET = BASE_HEIGHT_OFFSET
+
+// ── Zoom limits ───────────────────────────────────────────────────────────────
+private const val ZOOM_MIN  = 0.4f
+private const val ZOOM_MAX  = 2.0f
+private const val ZOOM_STEP = 0.15f
 
 // ── ISO projection — forward ──────────────────────────────────────────────────
 private fun isoX(ox: Float, col: Float, row: Float) =
@@ -867,7 +883,8 @@ class IsoRenderer {
         won: Boolean, winTimer: Float, hint: String,
         btnView: RectF, btnRotL: RectF, btnRotR: RectF,
         isIso: Boolean, rippleX: Float, rippleY: Float, rippleT: Float,
-        btnAction: RectF, currentActionLabel: String
+        btnAction: RectF, currentActionLabel: String,
+        btnZoomIn: RectF, btnZoomOut: RectF
     ) {
         // Tap ripple
         if (rippleT in 0f..0.4f) {
@@ -895,7 +912,9 @@ class IsoRenderer {
         btn(btnView, if (isIso) "TOP" else "ISO", !isIso)
         btn(btnRotL, "↺")
         btn(btnRotR, "↻")
-        btn(btnAction, currentActionLabel, highlight = true)
+        btn(btnAction,  currentActionLabel, highlight = true)
+        btn(btnZoomIn,  "+")
+        btn(btnZoomOut, "-")
 
         if (won) {
             val alpha = min(190, (winTimer * 280).toInt())
@@ -1221,7 +1240,33 @@ class GameInternalsView(context: Context, appContext: AppContext) :
     // ── HUD ───────────────────────────────────────────────────────────────────
     private var rippleX = 0f; private var rippleY = 0f; private var rippleT = -1f
     private val btnView = RectF(); private val btnRotL = RectF(); private val btnRotR = RectF()
-    private val btnAction = RectF()  // cycles the active long-press action
+    private val btnAction  = RectF()  // cycles the active long-press action
+    private val btnZoomIn  = RectF()  // + zoom
+    private val btnZoomOut = RectF()  // - zoom
+
+    // Current zoom level — drives the projection scale vars via applyZoom()
+    private var zoom = 1.0f
+
+    // Apply zoom: update the file-level projection vars and recompute offsets.
+    private fun applyZoom(newZoom: Float) {
+        zoom          = newZoom.coerceIn(ZOOM_MIN, ZOOM_MAX)
+        HALF_W        = BASE_HALF_W        * zoom
+        HALF_H        = BASE_HALF_H        * zoom
+        SIDE_H        = BASE_SIDE_H        * zoom
+        TILE          = BASE_TILE          * zoom
+        HEIGHT_OFFSET = BASE_HEIGHT_OFFSET * zoom
+        recomputeOffsets()
+    }
+
+    private fun recomputeOffsets() {
+        if (surfaceW == 0f) return
+        val midC = (LevelManager.currentLevel.cols - 1) / 2f
+        val midR = (LevelManager.currentLevel.rows - 1) / 2f
+        isoOx = surfaceW * 0.50f - (midC - midR) * HALF_W
+        isoOy = surfaceH * 0.42f - (midC + midR) * HALF_H
+        tdOx  = (surfaceW - LevelManager.currentLevel.cols * TILE) * 0.5f
+        tdOy  = (surfaceH - LevelManager.currentLevel.rows * TILE) * 0.45f
+    }
 
     // ── Gesture state ─────────────────────────────────────────────────────────
     private var touchStartX   = 0f; private var touchStartY = 0f
@@ -1258,16 +1303,17 @@ class GameInternalsView(context: Context, appContext: AppContext) :
         btnView.set(surfaceW / 2 - 26f, bm, surfaceW / 2 + 26f, bm + ubh)
         btnRotL.set(bm, bm, bm + ubw, bm + ubh)
         btnRotR.set(surfaceW - bm - ubw, bm, surfaceW - bm, bm + ubh)
-        // Action button — bottom-right, above the FAB area
+        // Action button — bottom-right corner
         val abw = 80f
         btnAction.set(surfaceW - bm - abw, surfaceH - bm - ubh, surfaceW - bm, surfaceH - bm)
 
-        val midC = (LevelManager.currentLevel.cols - 1) / 2f
-        val midR = (LevelManager.currentLevel.rows - 1) / 2f
-        isoOx = surfaceW * 0.50f - (midC - midR) * HALF_W
-        isoOy = surfaceH * 0.42f - (midC + midR) * HALF_H
-        tdOx  = (surfaceW - LevelManager.currentLevel.cols * TILE) * 0.5f
-        tdOy  = (surfaceH - LevelManager.currentLevel.rows * TILE) * 0.45f
+        // Zoom buttons — bottom-left corner, stacked vertically
+        val zbw = 44f; val zbh = 44f; val gap = 8f
+        btnZoomIn.set( bm, surfaceH - bm - zbh * 2 - gap, bm + zbw, surfaceH - bm - zbh - gap)
+        btnZoomOut.set(bm, surfaceH - bm - zbh,            bm + zbw, surfaceH - bm)
+
+        // Recompute offsets via applyZoom so scale stays consistent on rotation
+        applyZoom(zoom)
     }
 
     // ── Touch handling ────────────────────────────────────────────────────────
@@ -1282,8 +1328,10 @@ class GameInternalsView(context: Context, appContext: AppContext) :
                 if (btnView.contains(sx, sy)) { isIso = !isIso; return }
                 if (btnRotL.contains(sx, sy)) { rotation = (rotation + 3) % 4; return }
                 if (btnRotR.contains(sx, sy)) { rotation = (rotation + 1) % 4; return }
-                if (btnAction.contains(sx, sy)) { hasPendingCycleAction = true; return }
-                if (state.won)                { pendingReset = true; return }
+                if (btnAction.contains(sx, sy))  { hasPendingCycleAction = true; return }
+                if (btnZoomIn.contains(sx, sy))  { applyZoom(zoom + ZOOM_STEP); return }
+                if (btnZoomOut.contains(sx, sy)) { applyZoom(zoom - ZOOM_STEP); return }
+                if (state.won)                   { pendingReset = true; return }
 
                 // Compute direction toward touched tile for long-press build
                 val (dc, dr) = tapDirection(sx, sy)
@@ -1451,7 +1499,8 @@ class GameInternalsView(context: Context, appContext: AppContext) :
                 state.won, state.winTimer, LevelManager.currentLevel.hint,
                 btnView, btnRotL, btnRotR, isIso,
                 rippleX, rippleY, rippleT,
-                btnAction, state.currentBuildAction.label
+                btnAction, state.currentBuildAction.label,
+                btnZoomIn, btnZoomOut
             )
         } finally {
             canvas?.let { surfaceView.holder.unlockCanvasAndPost(it) }
