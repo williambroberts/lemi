@@ -92,6 +92,19 @@ private fun tdScreenToCol(sx: Float, ox: Float) = (sx - ox) / TILE
 private fun tdScreenToRow(sy: Float, oy: Float) = (sy - oy) / TILE
 
 // ═════════════════════════════════════════════════════════════════════════════
+//  LONG-PRESS ACTIONS
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Add new values here to introduce new long-press actions.
+// Each action must be handled in GameState.executeBuildAction().
+// The label is shown in the HUD cycle button.
+enum class BuildAction(val label: String) {
+    BUILD_TILE("+ Tile"),   // place a built tile adjacent to the player
+    REMOVE_TILE("- Tile"),  // remove a built (or level) tile adjacent to the player
+    // Future: ADD_GRASS("+ Grass"), ADD_WATER("+ Water"), etc.
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 //  LAYER 1 — GRID DATA
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -209,8 +222,8 @@ object LevelManager {
                 arrayOf("..", "..", "G1", "P2", "P3", "X4", "P3", "P2", "G1", "G0", "G0", ".."),
                 arrayOf("..", "..", "G1", "P2", "K3", "P3", "K3", "P2", "G1", "G0", "B0", ".."),
                 arrayOf("..", "..", "G1", "G1", "P2", "P2", "P2", "G1", "G1", "G0", "G0", ".."),
-                arrayOf("..", "F3", "F2", "F1", "G1", "T1", "G1", "G1", "G0", "G0", "G0", ".."),
-                arrayOf("..", "F4", "F5", "G6", "G7", "G8", "F2", "..", "..", "..", "..", "..")
+                arrayOf("..", "..", "..", "G1", "G1", "T1", "G1", "G1", "G0", "G0", "G0", ".."),
+                arrayOf("..", "..", "..", "..", "..", "..", "..", "..", "..", "..", "..", "..")
             )
         ))
     }
@@ -383,6 +396,11 @@ class GameState {
     // Build overlay — never touches LevelLayout
     val builtTiles = mutableMapOf<Pair<Int, Int>, BuiltTile>()
 
+    // Active long-press action — cycled by the HUD action button.
+    // Reading this on the game-loop thread is safe: it is only mutated from the
+    // UI thread via @Volatile pendingActionCycle, which is drained in update().
+    var currentBuildAction: BuildAction = BuildAction.BUILD_TILE; private set
+
     // Leaf tile hit counter — (col, row) → number of times player has contacted the tile.
     // When hits reach LEAF_MAX_HITS the tile is removed from the walkable world.
     // Stored here (not in LevelLayout) so it resets cleanly with the level.
@@ -419,46 +437,74 @@ class GameState {
         return CellInfo(h, tile.isWalkable, tile.type.charCode)
     }
 
-    // ── Build mechanic ────────────────────────────────────────────────────────
-    // playerH  = the height the player is currently standing at (targetHeight,
-    //            which already reflects built tiles the player may be on top of).
-    //
-    // Rules for the adjacent cell:
-    //   · void (no level tile, no built tile) → place at playerH
-    //   · existing height <  playerH          → place at playerH   (raise to match)
-    //   · existing height == playerH          → place at playerH+1 (raise by one)
-    //   · existing height >  playerH          → do nothing (already higher)
-    //
-    // "existing height" = builtTile height if present, otherwise level tile height.
-    // A built tile always wins over the level tile beneath it.
-    fun build(dc: Int, dr: Int) {
+    // ── Long-press action dispatcher ────────────────────────────────────────────
+    // Called from the game-loop thread via pendingBuild.
+    // Add new BuildAction cases here as the enum grows.
+    fun executeBuildAction(dc: Int, dr: Int) {
+        when (currentBuildAction) {
+            BuildAction.BUILD_TILE  -> buildTile(dc, dr)
+            BuildAction.REMOVE_TILE -> removeTile(dc, dr)
+        }
+    }
+
+    // Advance to the next BuildAction in enum order (wraps around).
+    // Called on the game-loop thread via pendingCycleAction.
+    fun cycleAction() {
+        val values = BuildAction.entries
+        val next   = (currentBuildAction.ordinal + 1) % values.size
+        currentBuildAction = values[next]
+    }
+
+    // ── BUILD_TILE ────────────────────────────────────────────────────────────────
+    // Rules:
+    //   · void → place at playerH
+    //   · existing height <  playerH  → raise to playerH
+    //   · existing height == playerH  → raise to playerH+1
+    //   · existing height >  playerH  → do nothing
+    private fun buildTile(dc: Int, dr: Int) {
         val nc    = targetCol + dc
         val nr    = targetRow + dr
         val level = LevelManager.currentLevel
 
         if (!level.isInBounds(nc, nr)) return
 
-        val playerH = targetHeight          // height player is standing on
+        val playerH = targetHeight
         val key     = Pair(nc, nr)
 
-        // Resolve current height of the adjacent cell (overlay wins)
         val existingBuilt = builtTiles[key]
         val levelTile     = level.tile(nc, nr)
         val currentH: Int? = when {
             existingBuilt != null -> existingBuilt.height
             levelTile     != null -> levelTile.height
-            else                  -> null   // void
+            else                  -> null
         }
 
         val newH: Int = when {
-            currentH == null    -> playerH      // void → bridge at player height
-            currentH < playerH  -> playerH      // below player → raise to match
-            currentH == playerH -> playerH + 1  // same level → raise by one
-            else                -> return       // already higher → do nothing
+            currentH == null    -> playerH
+            currentH < playerH  -> playerH
+            currentH == playerH -> playerH + 1
+            else                -> return
         }
 
         builtTiles[key] = BuiltTile(newH)
     }
+
+    // ── REMOVE_TILE ───────────────────────────────────────────────────────────────
+    // Only removes built-tile overlays (never level tiles).
+    // The adjacent cell must be within ±1 height of the player to be reachable.
+    private fun removeTile(dc: Int, dr: Int) {
+        val nc  = targetCol + dc
+        val nr  = targetRow + dr
+        val key = Pair(nc, nr)
+
+        val built = builtTiles[key] ?: return   // nothing to remove
+
+        val diff = built.height - targetHeight
+        if (diff < -1 || diff > 1) return       // out of reach — do nothing
+
+        builtTiles.remove(key)
+    }
+
 
     // ── Movement ──────────────────────────────────────────────────────────────
     fun move(dc: Int, dr: Int, shouldJump: Boolean = false) {
@@ -607,7 +653,6 @@ class GameState {
     private fun onArrived() {
         checkTeleport()
         checkSwitch()
-        checkLeaf()
         checkWin()
     }
 
@@ -821,7 +866,8 @@ class IsoRenderer {
         canvas: Canvas, sw: Float, sh: Float,
         won: Boolean, winTimer: Float, hint: String,
         btnView: RectF, btnRotL: RectF, btnRotR: RectF,
-        isIso: Boolean, rippleX: Float, rippleY: Float, rippleT: Float
+        isIso: Boolean, rippleX: Float, rippleY: Float, rippleT: Float,
+        btnAction: RectF, currentActionLabel: String
     ) {
         // Tap ripple
         if (rippleT in 0f..0.4f) {
@@ -849,6 +895,7 @@ class IsoRenderer {
         btn(btnView, if (isIso) "TOP" else "ISO", !isIso)
         btn(btnRotL, "↺")
         btn(btnRotR, "↻")
+        btn(btnAction, currentActionLabel, highlight = true)
 
         if (won) {
             val alpha = min(190, (winTimer * 280).toInt())
@@ -1162,6 +1209,9 @@ class GameInternalsView(context: Context, appContext: AppContext) :
     @Volatile private var pendingBuildDr: Int     = 0
     @Volatile private var hasPendingBuild: Boolean = false
 
+    // Cycle the active build action (UI thread → game thread)
+    @Volatile private var hasPendingCycleAction: Boolean = false
+
     // ── Offsets ───────────────────────────────────────────────────────────────
     private var isoOx = 0f; private var isoOy = 0f
     private var tdOx  = 0f; private var tdOy  = 0f
@@ -1171,6 +1221,7 @@ class GameInternalsView(context: Context, appContext: AppContext) :
     // ── HUD ───────────────────────────────────────────────────────────────────
     private var rippleX = 0f; private var rippleY = 0f; private var rippleT = -1f
     private val btnView = RectF(); private val btnRotL = RectF(); private val btnRotR = RectF()
+    private val btnAction = RectF()  // cycles the active long-press action
 
     // ── Gesture state ─────────────────────────────────────────────────────────
     private var touchStartX   = 0f; private var touchStartY = 0f
@@ -1207,6 +1258,9 @@ class GameInternalsView(context: Context, appContext: AppContext) :
         btnView.set(surfaceW / 2 - 26f, bm, surfaceW / 2 + 26f, bm + ubh)
         btnRotL.set(bm, bm, bm + ubw, bm + ubh)
         btnRotR.set(surfaceW - bm - ubw, bm, surfaceW - bm, bm + ubh)
+        // Action button — bottom-right, above the FAB area
+        val abw = 80f
+        btnAction.set(surfaceW - bm - abw, surfaceH - bm - ubh, surfaceW - bm, surfaceH - bm)
 
         val midC = (LevelManager.currentLevel.cols - 1) / 2f
         val midR = (LevelManager.currentLevel.rows - 1) / 2f
@@ -1228,6 +1282,7 @@ class GameInternalsView(context: Context, appContext: AppContext) :
                 if (btnView.contains(sx, sy)) { isIso = !isIso; return }
                 if (btnRotL.contains(sx, sy)) { rotation = (rotation + 3) % 4; return }
                 if (btnRotR.contains(sx, sy)) { rotation = (rotation + 1) % 4; return }
+                if (btnAction.contains(sx, sy)) { hasPendingCycleAction = true; return }
                 if (state.won)                { pendingReset = true; return }
 
                 // Compute direction toward touched tile for long-press build
@@ -1363,9 +1418,13 @@ class GameInternalsView(context: Context, appContext: AppContext) :
             pendingReset = false; hasPending = false; hasPendingBuild = false
             state.reset(); return
         }
+        if (hasPendingCycleAction) {
+            hasPendingCycleAction = false
+            state.cycleAction()
+        }
         if (hasPendingBuild) {
             hasPendingBuild = false
-            state.build(pendingBuildDc, pendingBuildDr)
+            state.executeBuildAction(pendingBuildDc, pendingBuildDr)
         }
         if (hasPending) {
             hasPending = false
@@ -1391,7 +1450,8 @@ class GameInternalsView(context: Context, appContext: AppContext) :
                 canvas, surfaceW, surfaceH,
                 state.won, state.winTimer, LevelManager.currentLevel.hint,
                 btnView, btnRotL, btnRotR, isIso,
-                rippleX, rippleY, rippleT
+                rippleX, rippleY, rippleT,
+                btnAction, state.currentBuildAction.label
             )
         } finally {
             canvas?.let { surfaceView.holder.unlockCanvasAndPost(it) }
