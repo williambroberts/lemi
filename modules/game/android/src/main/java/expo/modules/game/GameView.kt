@@ -209,8 +209,8 @@ object LevelManager {
                 arrayOf("..", "..", "G1", "P2", "P3", "X4", "P3", "P2", "G1", "G0", "G0", ".."),
                 arrayOf("..", "..", "G1", "P2", "K3", "P3", "K3", "P2", "G1", "G0", "B0", ".."),
                 arrayOf("..", "..", "G1", "G1", "P2", "P2", "P2", "G1", "G1", "G0", "G0", ".."),
-                arrayOf("..", "..", "..", "G1", "G1", "T1", "G1", "G1", "G0", "G0", "G0", ".."),
-                arrayOf("..", "..", "..", "..", "..", "..", "..", "..", "..", "..", "..", "..")
+                arrayOf("..", "F3", "F2", "F1", "G1", "T1", "G1", "G1", "G0", "G0", "G0", ".."),
+                arrayOf("..", "F4", "F5", "G6", "G7", "G8", "F2", "..", "..", "..", "..", "..")
             )
         ))
     }
@@ -234,6 +234,31 @@ object TileRegistry {
 
         // Built tile — placed by the player via long-press
         register(BasicTile('~', Theme.builtTop,  Theme.builtL,  Theme.builtR))
+
+        // Leaf tile — degrades over LEAF_MAX_HITS player contacts then disappears.
+        // Colour alpha fades linearly from fully opaque → transparent as hits increase.
+        // Hit count is stored in GameState.leafHits, not in the tile itself, so the
+        // LevelLayout grid stays immutable.  charCode = 'F' (fragile).
+        val LEAF_MAX_HITS = 3   // ← adjust here to change durability
+        register(object : TileType {
+            override val charCode   = 'F'
+            override val isWalkable = true
+
+            private fun alpha(state: GameState, col: Int, row: Int): Int {
+                val hits = state.leafHits[Pair(col, row)] ?: 0
+                // 255 at 0 hits → ~85 at maxHits-1 (tile disappears at maxHits)
+                return (255f * (1f - hits.toFloat() / LEAF_MAX_HITS)).toInt().coerceIn(60, 255)
+            }
+
+            private fun tinted(base: Int, state: GameState, col: Int, row: Int): Int {
+                val a = alpha(state, col, row)
+                return Color.argb(a, Color.red(base), Color.green(base), Color.blue(base))
+            }
+
+            override fun getTopColor  (state: GameState, col: Int, row: Int) = tinted(Theme.leafTop, state, col, row)
+            override fun getLeftColor (state: GameState, col: Int, row: Int) = tinted(Theme.leafL,   state, col, row)
+            override fun getRightColor(state: GameState, col: Int, row: Int) = tinted(Theme.leafR,   state, col, row)
+        })
 
         register(object : BasicTile('T', Theme.teleportTop, Theme.teleportL, Theme.teleportR) {})
 
@@ -275,6 +300,9 @@ private object Theme {
 
     // Built tile — muted teal/slate, visually distinct from all natural tiles
     val builtTop    = Color.rgb( 90, 160, 160); val builtL      = Color.rgb( 60, 120, 120); val builtR      = Color.rgb( 45,  95,  95)
+
+    // Leaf tile — warm olive green; alpha fades as hits accumulate (see LeafTile)
+    val leafTop     = Color.rgb(140, 180,  60); val leafL       = Color.rgb(100, 140,  40); val leafR       = Color.rgb( 80, 115,  30)
 
     val movingEW1Top = Color.rgb(100, 180, 255); val movingEW1L = Color.rgb( 70, 140, 210); val movingEW1R = Color.rgb( 50, 110, 180)
     val movingEW2Top = Color.rgb( 60, 120, 255); val movingEW2L = Color.rgb( 40,  80, 210); val movingEW2R = Color.rgb( 30,  60, 180)
@@ -354,6 +382,11 @@ class GameState {
 
     // Build overlay — never touches LevelLayout
     val builtTiles = mutableMapOf<Pair<Int, Int>, BuiltTile>()
+
+    // Leaf tile hit counter — (col, row) → number of times player has contacted the tile.
+    // When hits reach LEAF_MAX_HITS the tile is removed from the walkable world.
+    // Stored here (not in LevelLayout) so it resets cleanly with the level.
+    val leafHits = mutableMapOf<Pair<Int, Int>, Int>()
 
     private var teleportLocked = false
 
@@ -441,11 +474,18 @@ class GameState {
         // Nothing there at all
         if (destBuilt == null && destLevel == null) return
 
+        // Broken leaf tiles are void
+        if (brokenLeaves.contains(Pair(nc, nr))) return
+
         // Door check (level tile only)
         if (destBuilt == null && destLevel?.type?.charCode == 'D' && doorOpenProgress < 0.9f) return
 
         // Walkability — built tiles are always walkable
         if (destBuilt == null && destLevel?.isWalkable == false) return
+
+        // Leaf tile contact — hit it when the player attempts to move onto it
+        // (whether or not the move ultimately succeeds due to height checks).
+        if (destBuilt == null && destLevel?.type?.charCode == 'F') hitLeaf(nc, nr)
 
         val currentH = targetHeight.toFloat()
         val destH: Float = when {
@@ -567,8 +607,36 @@ class GameState {
     private fun onArrived() {
         checkTeleport()
         checkSwitch()
+        checkLeaf()
         checkWin()
     }
+
+    // ── Leaf tile mechanic ───────────────────────────────────────────────────
+    // LEAF_MAX_HITS must match the value in TileRegistry.
+    private val LEAF_MAX_HITS = 3
+
+    // Called when the player arrives on a tile — damages a leaf tile underfoot.
+    private fun checkLeaf() {
+        val tile = LevelManager.currentLevel.tile(targetCol, targetRow) ?: return
+        if (tile.type.charCode == 'F') hitLeaf(targetCol, targetRow)
+    }
+
+    // Called from move() when the player attempts to step onto a leaf tile —
+    // damages it regardless of whether the move succeeds (contact = hit).
+    fun hitLeaf(col: Int, row: Int) {
+        val key  = Pair(col, row)
+        val hits = (leafHits[key] ?: 0) + 1
+        if (hits >= LEAF_MAX_HITS) {
+            leafHits.remove(key)          // tile is broken — treat as gone
+            brokenLeaves.add(key)
+        } else {
+            leafHits[key] = hits
+        }
+    }
+
+    // Cells whose leaf tile has been fully broken — renderer skips them,
+    // move() treats them as void.
+    val brokenLeaves = mutableSetOf<Pair<Int, Int>>()
 
     private fun checkWin() {
         if (targetCol == LevelManager.currentLevel.goalX &&
@@ -619,6 +687,8 @@ class GameState {
         playerHeight = targetHeight.toFloat()
 
         builtTiles.clear()
+        leafHits.clear()
+        brokenLeaves.clear()
         physics.build()
     }
 }
@@ -846,6 +916,7 @@ class IsoRenderer {
         val level = LevelManager.currentLevel
         for (r in 0 until level.rows) for (c in 0 until level.cols) {
             val tile = level.tile(c, r) ?: continue
+            if (state.brokenLeaves.contains(Pair(c, r))) continue  // leaf fully broken
             val h    = tile.height.toFloat() + tile.type.getHeightOffset(state, c, r)
 
             var (rc, rr) = rotatedCoords(c.toFloat(), r.toFloat(), rotation)
