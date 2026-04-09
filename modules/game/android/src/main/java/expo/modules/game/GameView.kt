@@ -19,109 +19,141 @@ import kotlin.math.*
 // ═════════════════════════════════════════════════════════════════════════════
 //  ARCHITECTURE
 //
-//  Layer 1 — Grid data (LevelLayout/LevelManager): pure data, no logic, no coords
+//  Layer 1 — Grid data (LevelLayout/LevelManager): seed-only after init
 //  Layer 2 — Game logic (GameState):     pure grid integers, no screen coords
-//  Layer 3 — Projection:                 two interchangeable implementations
-//              · Iso  — isoX/isoY + inverse screenToCol/screenToRow
-//              · TopDown — simple col*TILE / row*TILE + inverse
-//            Toggle via the "ISO/TOP" button in the HUD.
-//            The game logic layer (Layer 2) is completely unaffected.
+//  Layer 3 — Projection:                 Iso and TopDown, toggled via HUD
 //  Layer 4 — Rendering (IsoRenderer):    draws using Layer 3, reads Layer 1/2
 //  Layer 5 — View (GameInternalsView):   SurfaceView lifecycle + touch input
 //
-//  VISUAL OFFSET
+//  VOXEL WORLD
+//  ───────────
+//  GameState owns a VoxelWorld: Map<Pair<Int,Int>, MutableMap<Int,Char>>
+//    (col, row) → (height → tileChar)
+//  Any height can have any tile; gaps are legal (floating tiles).
+//  LevelLayout seeds the world at init; after that it is never read again.
+//
+//  PLAYER
+//  ──────
+//  Player is a 1-unit-tall cube. targetHeight is the bottom of that cube.
+//  Movement: player can walk freely to same-height or lower tiles.
+//  To move UP by exactly 1 tile the player MUST swipe (jump).
+//  Steps > 1 tile up are always blocked regardless of jump.
+//  Falls freely to highest reachable tile when stepping into lower terrain.
+//
+//  PLACE (long-press)
+//  ──────────────────
+//  Places a block at floor level in the adjacent cell:
+//    • If the dest column is EMPTY → place at (targetHeight - 1)  [extend ground]
+//    • If dest column has tiles    → place at (bottomHeight - 1)   [extend downward]
+//  Costs 1 from inventory of selected type.
+//
+//  REMOVE
+//  ──────
+//  Removes the tile at targetHeight in the adjacent cell.
+//  Refunds 1 to inventory.
+//  If that was the bottom tile of the column, auto-spawns same char at
+//  height-1 down to MIN_WORLD_DEPTH.
+//
+//  CUBE TILES
+//  ──────────
+//  BASE_SIDE_H == BASE_HALF_W * 2  so every tile face is square.
+//
+//  PLAYER CENTERING
+//  ────────────────
+//  Player is rendered at (col+0.5, row+0.5) so it sits in the tile centre.
+//
+//  ANIMATED TILES
+//  ──────────────
+//  TileType retains getHeightOffset() and getPositionOffset() exactly as
+//  the original. These are applied in renderVoxels() and move() via
+//  TileRegistry lookups on the stored char.
+//
+//  LEAF TILES (F)
+//  ──────────────
+//  leafHits / brokenLeaves live in GameState. When a leaf tile is broken it
+//  is removed from the VoxelWorld entirely.
+//
+//  SPECIAL CELLS
 //  ─────────────
-//  Iso tiles are drawn with isoX/Y(col, row) at their NORTH CORNER, not
-//  their visual centre.  The centre of tile (col, row) in screen space is
-//  isoX/Y(col+0.5, row+0.5).  The player and objects therefore apply a
-//  +0.5 offset BEFORE the iso transform so they sit on the tile centre
-//  visually.  This is a projection-layer change only — no logic is affected.
+//  Goals, blockers seeded from LevelLayout into GameState.specialCells.
+//  Never modified by place/remove.
+//
+//  INVENTORY
+//  ─────────
+//  inventory: Map<Char,Int> seeded per level. Place costs 1, remove refunds 1.
+//  currentPlaceTileChar selects which type to place.
 //
 //  THREADING
 //  ─────────
-//  UI thread writes @Volatile pendingDc/pendingDr/hasPending.
-//  Game loop thread drains them at the top of update() and calls state.move().
-//  All GameState mutations happen on the game loop thread only — no races.
+//  UI thread writes @Volatile pending* fields.
+//  Game loop thread drains them at top of update().
+//  All VoxelWorld/GameState mutations happen on the game loop thread only.
 //
-//  PHYSICS
-//  ───────
-//  dyn4j holds wall bodies, stepped every frame, ready for future entities.
-//  The player is NOT a physics body — movement is a lerp.
-//
-//  BUILD OVERLAY
-//  ─────────────
-//  Long-pressing a direction places a "built" tile adjacent to the player.
-//  Built tiles are stored in GameState.builtTiles — a Map<Pair<Int,Int>, Int>
-//  of (col, row) → height. They never mutate LevelLayout. The renderer reads
-//  both LevelLayout and builtTiles when drawing, with builtTiles drawn on top
-//  of null cells or rendered as raised versions of existing cells.
-//  Rules:
-//    · Target cell is null/void → place at player's current tile height
-//    · Target cell exists and height >= player tile height + 1 → do nothing
-//    · Target cell exists and height < player tile height + 1 → place at
-//      player tile height + 1
+//  MIN_WORLD_DEPTH = -3
+//  ─────────────────────
+//  Auto-generated floor tiles never go below this height.
 // ═════════════════════════════════════════════════════════════════════════════
 
 // ── Projection base constants (unscaled) ─────────────────────────────────────
-// All projection functions take the current scale via a Projection object so
-// zoom applies uniformly without touching game logic or renderer internals.
-private const val BASE_HALF_W       = 36f
-private const val BASE_HALF_H       = 18f
-private const val BASE_SIDE_H       = 18f
-private const val BASE_TILE         = 40f
-private const val BASE_HEIGHT_OFFSET = 20f
+private const val BASE_HALF_W        = 36f
+private const val BASE_HALF_H        = 18f
+// CUBE: side height = HALF_W * 2 so the vertical face is a perfect square
+private const val BASE_SIDE_H        = BASE_HALF_W * 2f   // = 72f
+private const val BASE_TILE          = 40f
+private const val BASE_HEIGHT_OFFSET = BASE_SIDE_H         // match cube face height
 
-// ── Scaled projection values — computed from BASE_* × zoom ───────────────────
-// Held as top-level vars so they read exactly like the old constants everywhere.
-// Updated by GameInternalsView.applyZoom() whenever the zoom level changes.
 private var HALF_W        = BASE_HALF_W
 private var HALF_H        = BASE_HALF_H
 private var SIDE_H        = BASE_SIDE_H
 private var TILE          = BASE_TILE
 private var HEIGHT_OFFSET = BASE_HEIGHT_OFFSET
 
-// ── Zoom limits ───────────────────────────────────────────────────────────────
 private const val ZOOM_MIN  = 0.4f
 private const val ZOOM_MAX  = 2.0f
 private const val ZOOM_STEP = 0.15f
 
-// ── ISO projection — forward ──────────────────────────────────────────────────
+private const val MIN_WORLD_DEPTH = -3
+
+// ── ISO projection ────────────────────────────────────────────────────────────
 private fun isoX(ox: Float, col: Float, row: Float) =
     ox + (col - row) * HALF_W
 
 private fun isoY(oy: Float, col: Float, row: Float, height: Float = 0f) =
     oy + (col + row) * HALF_H - height * HEIGHT_OFFSET
 
-// ── ISO projection — inverse ──────────────────────────────────────────────────
 private fun isoScreenToCol(sx: Float, sy: Float, ox: Float, oy: Float) =
     ((sx - ox) / HALF_W + (sy - oy) / HALF_H) * 0.5f
 
 private fun isoScreenToRow(sx: Float, sy: Float, ox: Float, oy: Float) =
     ((sy - oy) / HALF_H - (sx - ox) / HALF_W) * 0.5f
 
-// ── TOP-DOWN projection — forward ─────────────────────────────────────────────
+// ── TOP-DOWN projection ───────────────────────────────────────────────────────
 private fun tdX(ox: Float, col: Float) = ox + col * TILE
 private fun tdY(oy: Float, row: Float) = oy + row * TILE
-
-// ── TOP-DOWN projection — inverse ─────────────────────────────────────────────
 private fun tdScreenToCol(sx: Float, ox: Float) = (sx - ox) / TILE
 private fun tdScreenToRow(sy: Float, oy: Float) = (sy - oy) / TILE
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  LONG-PRESS ACTIONS
+//  BUILD ACTIONS
 // ═════════════════════════════════════════════════════════════════════════════
 
-// Add new values here to introduce new long-press actions.
-// Each action must be handled in GameState.executeBuildAction().
-// The label is shown in the HUD cycle button.
 enum class BuildAction(val label: String) {
-    BUILD_TILE("+ Tile"),   // place a built tile adjacent to the player
-    REMOVE_TILE("- Tile"),  // remove a built (or level) tile adjacent to the player
-    // Future: ADD_GRASS("+ Grass"), ADD_WATER("+ Water"), etc.
+    BUILD_TILE("Place"),
+    REMOVE_TILE("Remove"),
+}
+
+// Tile chars placeable by the player. Add a char here + register in TileRegistry.
+val PLACEABLE_TILE_CHARS = listOf('G', 'S', 'P')
+
+fun tileDisplayName(char: Char): String = when (char) {
+    'G'  -> "Grass"
+    'S'  -> "Sand"
+    'P'  -> "Stone"
+    else -> char.toString()
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  LAYER 1 — GRID DATA
+//  LAYER 1 — TILE TYPES
 // ═════════════════════════════════════════════════════════════════════════════
 
 interface TileType {
@@ -130,7 +162,9 @@ interface TileType {
     fun getTopColor(state: GameState, col: Int, row: Int): Int
     fun getLeftColor(state: GameState, col: Int, row: Int): Int
     fun getRightColor(state: GameState, col: Int, row: Int): Int
+    // Vertical visual offset in tile units (e.g. bobbing barrier tile)
     fun getHeightOffset(state: GameState, col: Int, row: Int): Float = 0f
+    // Horizontal position offset in grid units (e.g. moving platforms)
     fun getPositionOffset(state: GameState, col: Int, row: Int): Pair<Float, Float> = Pair(0f, 0f)
 }
 
@@ -141,71 +175,61 @@ open class BasicTile(
     private val rightColor: Int,
     override val isWalkable: Boolean = true
 ) : TileType {
-    override fun getTopColor(state: GameState, col: Int, row: Int) = topColor
-    override fun getLeftColor(state: GameState, col: Int, row: Int) = leftColor
+    override fun getTopColor(state: GameState, col: Int, row: Int)   = topColor
+    override fun getLeftColor(state: GameState, col: Int, row: Int)  = leftColor
     override fun getRightColor(state: GameState, col: Int, row: Int) = rightColor
 }
 
 enum class ObjectType { BLOCKER, GOAL, NONE }
 
-data class Tile(
-    val type:       TileType,
-    val obj:        ObjectType = ObjectType.NONE,
-    val isWalkable: Boolean    = true,
-    val isGoal:     Boolean    = false,
-    val height:     Int        = 0
-)
-
+// ── LevelLayout — seed only ───────────────────────────────────────────────────
+// Parsed once; never read again after GameState.initLevel().
+// "G2" = grass top at height 2, stone fill 0..1.  ".." = void column.
 class LevelLayout(
     val layout: Array<Array<String>>,
     val startX: Int  = 1,
     val startY: Int  = 1,
-    val hint:   String = "Tap to move · Long-press to build"
+    val hint:   String = "Tap · Swipe to jump",
+    val startInventory: Map<Char, Int> = mapOf('G' to 8, 'S' to 4, 'P' to 4)
 ) {
-    val grid: Array<Array<Tile?>> = Array(layout.size) { r ->
-        Array(layout[r].size) { c ->
-            val code = layout[r][c]
-            if (code == "..") null
-            else {
-                val typeChar = code[0]
-                val height   = code[1].digitToInt()
-                val tileType = TileRegistry.get(typeChar) ?: TileRegistry.get('G')!!
+    val cols = layout[0].size
+    val rows = layout.size
 
-                var obj        = ObjectType.NONE
-                var isWalkable = tileType.isWalkable
-                var isGoal     = false
+    data class SeedEntry(val col: Int, val row: Int, val height: Int, val char: Char)
 
-                if (typeChar == 'B') { obj = ObjectType.BLOCKER; isWalkable = false }
-                if (typeChar == 'X') { obj = ObjectType.GOAL;    isGoal     = true  }
-
-                Tile(tileType, obj, isWalkable, isGoal, height)
-            }
+    val seedEntries: List<SeedEntry> by lazy {
+        val out = mutableListOf<SeedEntry>()
+        for (r in layout.indices) for (c in layout[r].indices) {
+            val code = layout[r][c]; if (code == "..") continue
+            val char   = code[0]
+            val height = code[1].digitToInt()
+            for (h in 0..height) out.add(SeedEntry(c, r, h, if (h == height) char else 'P'))
         }
+        out
     }
-
-    val cols = grid[0].size
-    val rows = grid.size
 
     val goalX: Int
     val goalY: Int
+    val specialCells: Map<Pair<Int, Int>, ObjectType>
 
     init {
+        val specials = mutableMapOf<Pair<Int, Int>, ObjectType>()
         var gx = startX; var gy = startY
-        outer@ for (r in grid.indices) for (c in grid[r].indices) {
-            if (grid[r][c]?.isGoal == true) { gx = c; gy = r; break@outer }
+        for (r in layout.indices) for (c in layout[r].indices) {
+            val code = layout[r][c]; if (code == "..") continue
+            when (code[0]) {
+                'X' -> { gx = c; gy = r; specials[Pair(c, r)] = ObjectType.GOAL    }
+                'B' -> {               specials[Pair(c, r)] = ObjectType.BLOCKER }
+            }
         }
         goalX = gx; goalY = gy
+        specialCells = specials
     }
 
-    fun tile(col: Int, row: Int): Tile? = grid.getOrNull(row)?.getOrNull(col)
-    fun isInBounds(col: Int, row: Int): Boolean =
-        col in 0 until cols && row in 0 until rows
-
-    fun findOtherTeleport(currentC: Int, currentR: Int): Pair<Int, Int>? {
-        for (r in grid.indices) for (c in grid[r].indices) {
-            val t = grid[r][c]
-            if (t != null && t.type.charCode == 'T' && (c != currentC || r != currentR))
-                return Pair(c, r)
+    fun findOtherTeleport(currentC: Int, currentR: Int, voxel: VoxelWorld): Pair<Int, Int>? {
+        for ((pos, col) in voxel.columns) {
+            if (col.values.any { it == 'T' } &&
+                (pos.first != currentC || pos.second != currentR)) return pos
         }
         return null
     }
@@ -214,14 +238,10 @@ class LevelLayout(
 object LevelManager {
     val levels = mutableListOf<LevelLayout>()
     var currentLevelIndex = 0
-
     val currentLevel: LevelLayout get() = levels[currentLevelIndex]
 
     fun loadNextLevel(): Boolean {
-        if (currentLevelIndex < levels.size - 1) {
-            currentLevelIndex++
-            return true
-        }
+        if (currentLevelIndex < levels.size - 1) { currentLevelIndex++; return true }
         return false
     }
 
@@ -240,7 +260,8 @@ object LevelManager {
                 arrayOf("..", "..", "G1", "G1", "P2", "P2", "P2", "G1", "G1", "G0", "G0", ".."),
                 arrayOf("..", "..", "..", "G1", "G1", "T1", "G1", "G1", "G0", "G0", "G0", ".."),
                 arrayOf("..", "..", "..", "..", "..", "..", "..", "..", "..", "..", "..", "..")
-            )
+            ),
+            startInventory = mapOf('G' to 8, 'S' to 4, 'P' to 6)
         ))
     }
 }
@@ -251,51 +272,44 @@ object LevelManager {
 
 object TileRegistry {
     private val types = mutableMapOf<Char, TileType>()
-    fun register(type: TileType) { types[type.charCode] = type }
-    fun get(char: Char): TileType? = types[char]
+    fun register(t: TileType) { types[t.charCode] = t }
+    fun get(c: Char): TileType? = types[c]
 
     init {
         register(BasicTile('G', Theme.grassTop,  Theme.grassL,  Theme.grassR))
         register(BasicTile('S', Theme.sandTop,   Theme.sandL,   Theme.sandR))
         register(BasicTile('P', Theme.stoneTop,  Theme.stoneL,  Theme.stoneR))
-        register(BasicTile('B', Theme.grassTop,  Theme.grassL,  Theme.grassR,  isWalkable = false))
+        register(BasicTile('B', Theme.grassTop,  Theme.grassL,  Theme.grassR, isWalkable = false))
         register(BasicTile('X', Theme.stoneTop,  Theme.stoneL,  Theme.stoneR))
 
-        // Built tile — placed by the player via long-press
-        register(BasicTile('~', Theme.builtTop,  Theme.builtL,  Theme.builtR))
-
-        // Leaf tile — degrades over LEAF_MAX_HITS player contacts then disappears.
-        // Colour alpha fades linearly from fully opaque → transparent as hits increase.
-        // Hit count is stored in GameState.leafHits, not in the tile itself, so the
-        // LevelLayout grid stays immutable.  charCode = 'F' (fragile).
-        val LEAF_MAX_HITS = 3   // ← adjust here to change durability
+        // Leaf tile — LEAF_MAX_HITS contacts then removed from VoxelWorld.
+        // Alpha fades as hits accumulate.
+        val LEAF_MAX_HITS = 3
         register(object : TileType {
             override val charCode   = 'F'
             override val isWalkable = true
-
             private fun alpha(state: GameState, col: Int, row: Int): Int {
                 val hits = state.leafHits[Pair(col, row)] ?: 0
-                // 255 at 0 hits → ~85 at maxHits-1 (tile disappears at maxHits)
                 return (255f * (1f - hits.toFloat() / LEAF_MAX_HITS)).toInt().coerceIn(60, 255)
             }
-
             private fun tinted(base: Int, state: GameState, col: Int, row: Int): Int {
                 val a = alpha(state, col, row)
                 return Color.argb(a, Color.red(base), Color.green(base), Color.blue(base))
             }
-
             override fun getTopColor  (state: GameState, col: Int, row: Int) = tinted(Theme.leafTop, state, col, row)
             override fun getLeftColor (state: GameState, col: Int, row: Int) = tinted(Theme.leafL,   state, col, row)
             override fun getRightColor(state: GameState, col: Int, row: Int) = tinted(Theme.leafR,   state, col, row)
         })
 
-        register(object : BasicTile('T', Theme.teleportTop, Theme.teleportL, Theme.teleportR) {})
+        register(BasicTile('T', Theme.teleportTop, Theme.teleportL, Theme.teleportR))
 
+        // Barrier tile — bobs vertically; requires jump for any upward step
         register(object : BasicTile('K', Theme.barrierTop, Theme.barrierL, Theme.barrierR) {
             override fun getHeightOffset(state: GameState, col: Int, row: Int): Float =
                 (sin(state.stateTime * 2f + (col + row)) + 1f) * 0.75f
         })
 
+        // Moving platform tiles — oscillate along an axis
         class MovingTile(
             charCode: Char, top: Int, left: Int, right: Int,
             val axis: String, val speed: Float, val range: Float
@@ -310,279 +324,327 @@ object TileRegistry {
         register(MovingTile('3', Theme.movingNS1Top, Theme.movingNS1L, Theme.movingNS1R, "NS", 1.5f, 0.5f))
         register(MovingTile('4', Theme.movingNS2Top, Theme.movingNS2L, Theme.movingNS2R, "NS", 1.5f, 1.0f))
 
+        // Switch — top colour driven by state.isSwitchOn
         register(object : BasicTile('W', Theme.switchOff, Theme.stoneL, Theme.stoneR) {
             override fun getTopColor(state: GameState, col: Int, row: Int) =
                 if (state.isSwitchOn) Theme.switchOn else Theme.switchOff
         })
 
-        register(object : BasicTile('D', Theme.doorTop, Theme.doorL, Theme.doorR) {})
+        register(BasicTile('D', Theme.doorTop, Theme.doorL, Theme.doorR))
     }
 }
 
 private object Theme {
-    val skyTop      = Color.rgb(100, 155, 210); val skyBot      = Color.rgb(165, 200, 235)
-    val grassTop    = Color.rgb( 95, 145,  68); val grassL      = Color.rgb( 68, 108,  46); val grassR      = Color.rgb( 55,  92,  36)
-    val sandTop     = Color.rgb(200, 175, 120); val sandL       = Color.rgb(162, 138,  85); val sandR       = Color.rgb(142, 120,  68)
-    val stoneTop    = Color.rgb(142, 136, 126); val stoneL      = Color.rgb(102,  98,  90); val stoneR      = Color.rgb( 86,  84,  78)
-    val teleportTop = Color.rgb(180, 100, 255); val teleportL   = Color.rgb(140,  70, 210); val teleportR   = Color.rgb(110,  50, 180)
-    val barrierTop  = Color.rgb(220,  60,  60); val barrierL    = Color.rgb(170,  40,  40); val barrierR    = Color.rgb(130,  30,  30)
-
-    // Built tile — muted teal/slate, visually distinct from all natural tiles
-    val builtTop    = Color.rgb( 90, 160, 160); val builtL      = Color.rgb( 60, 120, 120); val builtR      = Color.rgb( 45,  95,  95)
-
-    // Leaf tile — warm olive green; alpha fades as hits accumulate (see LeafTile)
-    val leafTop     = Color.rgb(140, 180,  60); val leafL       = Color.rgb(100, 140,  40); val leafR       = Color.rgb( 80, 115,  30)
-
-    val movingEW1Top = Color.rgb(100, 180, 255); val movingEW1L = Color.rgb( 70, 140, 210); val movingEW1R = Color.rgb( 50, 110, 180)
-    val movingEW2Top = Color.rgb( 60, 120, 255); val movingEW2L = Color.rgb( 40,  80, 210); val movingEW2R = Color.rgb( 30,  60, 180)
-    val movingNS1Top = Color.rgb(100, 255, 180); val movingNS1L = Color.rgb( 70, 210, 140); val movingNS1R = Color.rgb( 50, 180, 110)
-    val movingNS2Top = Color.rgb( 60, 255, 120); val movingNS2L = Color.rgb( 40, 210,  80); val movingNS2R = Color.rgb( 30, 180,  60)
-
-    val switchOff   = Color.rgb(100, 100, 100); val switchOn    = Color.rgb(100, 255, 100)
-    val doorTop     = Color.rgb(150, 100,  50); val doorL       = Color.rgb(120,  80,  40); val doorR       = Color.rgb( 90,  60,  30)
-    val blocker     = Color.rgb(185,  80,  65); val blockerL    = Color.rgb(140,  55,  42); val blockerR    = Color.rgb(118,  45,  35)
-    val goal        = Color.rgb(255, 210,  50); val goalGlow    = Color.argb( 60, 255, 210, 50)
-    val player      = Color.rgb( 50, 200, 205); val playerL     = Color.rgb( 35, 137, 150)
-    val shadow      = Color.argb( 45,   0,   0,   0)
-    val edge        = Color.argb( 48,   0,   0,   0)
+    val skyTop       = Color.rgb(100, 155, 210); val skyBot       = Color.rgb(165, 200, 235)
+    val grassTop     = Color.rgb( 95, 145,  68); val grassL       = Color.rgb( 68, 108,  46); val grassR       = Color.rgb( 55,  92,  36)
+    val sandTop      = Color.rgb(200, 175, 120); val sandL        = Color.rgb(162, 138,  85); val sandR        = Color.rgb(142, 120,  68)
+    val stoneTop     = Color.rgb(142, 136, 126); val stoneL       = Color.rgb(102,  98,  90); val stoneR       = Color.rgb( 86,  84,  78)
+    val teleportTop  = Color.rgb(180, 100, 255); val teleportL    = Color.rgb(140,  70, 210); val teleportR    = Color.rgb(110,  50, 180)
+    val barrierTop   = Color.rgb(220,  60,  60); val barrierL     = Color.rgb(170,  40,  40); val barrierR     = Color.rgb(130,  30,  30)
+    val leafTop      = Color.rgb(140, 180,  60); val leafL        = Color.rgb(100, 140,  40); val leafR        = Color.rgb( 80, 115,  30)
+    val movingEW1Top = Color.rgb(100, 180, 255); val movingEW1L   = Color.rgb( 70, 140, 210); val movingEW1R   = Color.rgb( 50, 110, 180)
+    val movingEW2Top = Color.rgb( 60, 120, 255); val movingEW2L   = Color.rgb( 40,  80, 210); val movingEW2R   = Color.rgb( 30,  60, 180)
+    val movingNS1Top = Color.rgb(100, 255, 180); val movingNS1L   = Color.rgb( 70, 210, 140); val movingNS1R   = Color.rgb( 50, 180, 110)
+    val movingNS2Top = Color.rgb( 60, 255, 120); val movingNS2L   = Color.rgb( 40, 210,  80); val movingNS2R   = Color.rgb( 30, 180,  60)
+    val switchOff    = Color.rgb(100, 100, 100); val switchOn     = Color.rgb(100, 255, 100)
+    val doorTop      = Color.rgb(150, 100,  50); val doorL        = Color.rgb(120,  80,  40); val doorR        = Color.rgb( 90,  60,  30)
+    val blocker      = Color.rgb(185,  80,  65); val blockerL     = Color.rgb(140,  55,  42); val blockerR     = Color.rgb(118,  45,  35)
+    val goal         = Color.rgb(255, 210,  50); val goalGlow     = Color.argb( 60, 255, 210,  50)
+    val player       = Color.rgb( 50, 200, 205); val playerL      = Color.rgb( 35, 137, 150)
+    val shadow       = Color.argb( 45,   0,   0,   0)
+    val edge         = Color.argb( 48,   0,   0,   0)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  LAYER 2 — GAME LOGIC
+//  VOXEL WORLD
+// ═════════════════════════════════════════════════════════════════════════════
+
+class VoxelWorld {
+    // (col, row) → (height → tileChar). Gaps are legal.
+    val columns = mutableMapOf<Pair<Int, Int>, MutableMap<Int, Char>>()
+
+    fun column(col: Int, row: Int): MutableMap<Int, Char> =
+        columns.getOrPut(Pair(col, row)) { mutableMapOf() }
+
+    fun tileAt(col: Int, row: Int, height: Int): Char? =
+        columns[Pair(col, row)]?.get(height)
+
+    fun setTile(col: Int, row: Int, height: Int, char: Char) {
+        column(col, row)[height] = char
+    }
+
+    fun removeTile(col: Int, row: Int, height: Int): Char? {
+        val c  = columns[Pair(col, row)] ?: return null
+        val ch = c.remove(height)
+        if (c.isEmpty()) columns.remove(Pair(col, row))
+        return ch
+    }
+
+    fun topHeight(col: Int, row: Int): Int? =
+        columns[Pair(col, row)]?.keys?.maxOrNull()
+
+    fun bottomHeight(col: Int, row: Int): Int? =
+        columns[Pair(col, row)]?.keys?.minOrNull()
+
+    // Highest tile h where top surface (h + hOff + 1) <= playerHeight + 2
+    fun reachableTopHeight(col: Int, row: Int, playerHeight: Int, state: GameState): Int? {
+        val c = columns[Pair(col, row)] ?: return null
+        return c.keys.filter { h ->
+            val char = c[h] ?: return@filter false
+            val hOff = TileRegistry.get(char)?.getHeightOffset(state, col, row) ?: 0f
+            (h.toFloat() + hOff + 1f) <= playerHeight.toFloat() + 2f
+        }.maxOrNull()
+    }
+
+    fun seed(level: LevelLayout) {
+        columns.clear()
+        for (e in level.seedEntries) setTile(e.col, e.row, e.height, e.char)
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  LAYER 2 — GAME STATE
 // ═════════════════════════════════════════════════════════════════════════════
 
 class PhysicsWorld {
     val world = World<Body>()
     init { world.setGravity(Vector2(0.0, 0.0)) }
 
-    fun build() {
+    fun build(voxel: VoxelWorld) {
         world.bodies.toList().forEach { world.removeBody(it) }
-        val level = LevelManager.currentLevel
-        for (r in level.grid.indices) for (c in level.grid[r].indices) {
-            val t = level.grid[r][c]
-            if (t != null && !t.isWalkable) addWallBody(c, r)
+        for ((pos, colMap) in voxel.columns) {
+            for ((h, char) in colMap) {
+                val tileType = TileRegistry.get(char)
+                if (tileType != null && !tileType.isWalkable) {
+                    val b = Body()
+                    b.addFixture(Geometry.createRectangle(0.95, 0.95))
+                    b.setMass(MassType.INFINITE)
+                    b.setAtRestDetectionEnabled(false)
+                    b.translate(pos.first.toDouble(), pos.second.toDouble())
+                    world.addBody(b)
+                }
+            }
         }
-    }
-
-    fun addWallBody(col: Int, row: Int) {
-        val b = Body()
-        b.addFixture(Geometry.createRectangle(0.95, 0.95))
-        b.setMass(MassType.INFINITE)
-        b.setAtRestDetectionEnabled(false)
-        b.translate(col.toDouble(), row.toDouble())
-        world.addBody(b)
     }
 
     fun step(dt: Double) { world.update(dt) }
 }
 
-// ── Built tile overlay ────────────────────────────────────────────────────────
-// Maps (col, row) → height of the player-placed tile.
-// Kept in GameState so it resets with the level and never touches LevelLayout.
-data class BuiltTile(val height: Int)
-
 class GameState {
     val physics = PhysicsWorld()
+    val voxel   = VoxelWorld()
 
-    var won          = false; private set
-    var winTimer     = 0f;    private set
-    var stateTime    = 0f;    private set
+    // Special cells seeded from level — never mutated by place/remove
+    var specialCells: Map<Pair<Int, Int>, ObjectType> = emptyMap()
+        private set
 
-    // Player visual position (lerped)
-    var playerCol    = LevelManager.currentLevel.startX.toFloat(); private set
-    var playerRow    = LevelManager.currentLevel.startY.toFloat(); private set
-    var playerHeight = 0f;                                          private set
+    var won       = false; private set
+    var winTimer  = 0f;    private set
+    var stateTime = 0f;    private set
 
-    // Player logical position (integer target)
-    var targetCol    = LevelManager.currentLevel.startX;           private set
-    var targetRow    = LevelManager.currentLevel.startY;           private set
-    var targetHeight = 0;                                           private set
+    var isSwitchOn       = false; private set
+    var doorOpenProgress = 0f;    private set
 
-    // Previous target — used for jump arc interpolation
-    var prevTargetCol = LevelManager.currentLevel.startX;          private set
-    var prevTargetRow = LevelManager.currentLevel.startY;          private set
+    // Player visual (lerped) — rendered at col+0.5, row+0.5 (tile centre)
+    var playerCol    = 0f; private set
+    var playerRow    = 0f; private set
+    var playerHeight = 0f; private set   // bottom of 1-unit-tall player cube
+
+    // Player logical target
+    var targetCol    = 0;  private set
+    var targetRow    = 0;  private set
+    var targetHeight = 0;  private set   // bottom of cube at rest
+
+    var prevTargetCol = 0; private set
+    var prevTargetRow = 0; private set
 
     var isJumping    = false; private set
     var jumpProgress = 0f;    private set
 
-    // Interactive states
-    var isSwitchOn       = false; private set
-    var doorOpenProgress = 0f;    private set
+    // Inventory
+    val inventory = mutableMapOf<Char, Int>()
+    var currentPlaceTileChar: Char  = PLACEABLE_TILE_CHARS.first(); private set
+    var currentBuildAction: BuildAction = BuildAction.BUILD_TILE;   private set
 
-    // Build overlay — never touches LevelLayout
-    val builtTiles = mutableMapOf<Pair<Int, Int>, BuiltTile>()
-
-    // Active long-press action — cycled by the HUD action button.
-    // Reading this on the game-loop thread is safe: it is only mutated from the
-    // UI thread via @Volatile pendingActionCycle, which is drained in update().
-    var currentBuildAction: BuildAction = BuildAction.BUILD_TILE; private set
-
-    // Leaf tile hit counter — (col, row) → number of times player has contacted the tile.
-    // When hits reach LEAF_MAX_HITS the tile is removed from the walkable world.
-    // Stored here (not in LevelLayout) so it resets cleanly with the level.
-    val leafHits = mutableMapOf<Pair<Int, Int>, Int>()
+    // Leaf tile state
+    val leafHits     = mutableMapOf<Pair<Int, Int>, Int>()
+    val brokenLeaves = mutableSetOf<Pair<Int, Int>>()
 
     private var teleportLocked = false
 
     private val LERP_SPEED    = 8f
     private val JUMP_DURATION = 0.35f
+    private val LEAF_MAX_HITS = 3
 
-    // Moving-platform char codes for quick lookup
     private val movingChars = setOf('1', '2', '3', '4')
 
-    init {
-        physics.build()
-        val startTile = LevelManager.currentLevel.tile(
-            LevelManager.currentLevel.startX,
-            LevelManager.currentLevel.startY
-        )
-        targetHeight = startTile?.height ?: 0
+    init { initLevel() }
+
+    private fun initLevel() {
+        val level = LevelManager.currentLevel
+        voxel.seed(level)
+        specialCells = level.specialCells
+
+        targetCol     = level.startX;  targetRow     = level.startY
+        prevTargetCol = level.startX;  prevTargetRow = level.startY
+
+        val startTop = voxel.topHeight(level.startX, level.startY) ?: 0
+        targetHeight = startTop + 1
+        playerCol    = targetCol.toFloat()
+        playerRow    = targetRow.toFloat()
         playerHeight = targetHeight.toFloat()
+
+        leafHits.clear(); brokenLeaves.clear()
+        teleportLocked = false; isJumping = false; jumpProgress = 0f
+        won = false; winTimer = 0f; stateTime = 0f
+        isSwitchOn = false; doorOpenProgress = 0f
+
+        physics.build(voxel)
+        seedInventory()
     }
 
-    // ── Tile resolution — checks overlay first, then level grid ──────────────
-    // Returns (height, isWalkable, charCode) or null if cell is void.
-    data class CellInfo(val height: Int, val isWalkable: Boolean, val charCode: Char)
-
-    fun resolveCell(col: Int, row: Int): CellInfo? {
-        val key = Pair(col, row)
-        val built = builtTiles[key]
-        if (built != null) return CellInfo(built.height, isWalkable = true, charCode = '~')
-        val tile = LevelManager.currentLevel.tile(col, row) ?: return null
-        val h = tile.height + tile.type.getHeightOffset(this, col, row).toInt()
-        return CellInfo(h, tile.isWalkable, tile.type.charCode)
+    private fun seedInventory() {
+        inventory.clear()
+        for ((char, count) in LevelManager.currentLevel.startInventory) {
+            if (char in PLACEABLE_TILE_CHARS) inventory[char] = count
+        }
+        for (char in PLACEABLE_TILE_CHARS) inventory.putIfAbsent(char, 0)
+        currentPlaceTileChar = PLACEABLE_TILE_CHARS.firstOrNull { (inventory[it] ?: 0) > 0 }
+            ?: PLACEABLE_TILE_CHARS.first()
     }
 
-    // ── Long-press action dispatcher ────────────────────────────────────────────
-    // Called from the game-loop thread via pendingBuild.
-    // Add new BuildAction cases here as the enum grows.
+    fun selectTileType(char: Char)       { if (char in PLACEABLE_TILE_CHARS) currentPlaceTileChar = char }
+    fun setAction(action: BuildAction)   { currentBuildAction = action }
+
+    // ── Place / Remove ────────────────────────────────────────────────────────
+
     fun executeBuildAction(dc: Int, dr: Int) {
         when (currentBuildAction) {
-            BuildAction.BUILD_TILE  -> buildTile(dc, dr)
+            BuildAction.BUILD_TILE  -> placeTile(dc, dr)
             BuildAction.REMOVE_TILE -> removeTile(dc, dr)
         }
     }
 
-    // Advance to the next BuildAction in enum order (wraps around).
-    // Called on the game-loop thread via pendingCycleAction.
-    fun cycleAction() {
-        val values = BuildAction.entries
-        val next   = (currentBuildAction.ordinal + 1) % values.size
-        currentBuildAction = values[next]
-    }
-
-    // ── BUILD_TILE ────────────────────────────────────────────────────────────────
-    // Rules:
-    //   · void → place at playerH
-    //   · existing height <  playerH  → raise to playerH
-    //   · existing height == playerH  → raise to playerH+1
-    //   · existing height >  playerH  → do nothing
-    private fun buildTile(dc: Int, dr: Int) {
-        val nc    = targetCol + dc
-        val nr    = targetRow + dr
+    // Place at floor level of the adjacent cell:
+    //   • Empty column  → place at (targetHeight - 1)  i.e. extend ground outward
+    //   • Column exists → place at (bottomHeight - 1)  i.e. extend downward
+    private fun placeTile(dc: Int, dr: Int) {
+        val count = inventory[currentPlaceTileChar] ?: 0
+        if (count <= 0) return
+        val nc = targetCol + dc; val nr = targetRow + dr
         val level = LevelManager.currentLevel
+        if (nc < 0 || nr < 0 || nc >= level.cols || nr >= level.rows) return
+        if (nc == targetCol && nr == targetRow) return  // can't place under self
 
-        if (!level.isInBounds(nc, nr)) return
-
-        val playerH = targetHeight
-        val key     = Pair(nc, nr)
-
-        val existingBuilt = builtTiles[key]
-        val levelTile     = level.tile(nc, nr)
-        val currentH: Int? = when {
-            existingBuilt != null -> existingBuilt.height
-            levelTile     != null -> levelTile.height
-            else                  -> null
+        val placeHeight = run {
+            val bottom = voxel.bottomHeight(nc, nr)
+            if (bottom == null) {
+                // Empty column — place flush with player's standing surface
+                targetHeight - 1
+            } else {
+                // Column exists — extend one below its current lowest tile
+                bottom - 1
+            }
         }
 
-        val newH: Int = when {
-            currentH == null    -> playerH
-            currentH < playerH  -> playerH
-            currentH == playerH -> playerH + 1
-            else                -> return
-        }
+        // Don't place below world depth limit
+        if (placeHeight < MIN_WORLD_DEPTH) return
 
-        builtTiles[key] = BuiltTile(newH)
+        voxel.setTile(nc, nr, placeHeight, currentPlaceTileChar)
+        inventory[currentPlaceTileChar] = count - 1
     }
 
-    // ── REMOVE_TILE ───────────────────────────────────────────────────────────────
-    // Only removes built-tile overlays (never level tiles).
-    // The adjacent cell must be within ±1 height of the player to be reachable.
     private fun removeTile(dc: Int, dr: Int) {
-        val nc  = targetCol + dc
-        val nr  = targetRow + dr
-        val key = Pair(nc, nr)
+        val nc = targetCol + dc; val nr = targetRow + dr
+        val level = LevelManager.currentLevel
+        if (nc < 0 || nr < 0 || nc >= level.cols || nr >= level.rows) return
 
-        val built = builtTiles[key] ?: return   // nothing to remove
+        val removed = voxel.removeTile(nc, nr, targetHeight) ?: return
 
-        val diff = built.height - targetHeight
-        if (diff < -1 || diff > 1) return       // out of reach — do nothing
+        // Refund — non-placeable types refund as 'G'
+        val refundChar = if (removed in PLACEABLE_TILE_CHARS) removed else 'G'
+        inventory[refundChar] = (inventory[refundChar] ?: 0) + 1
 
-        builtTiles.remove(key)
+        // Auto-regenerate floor if this was the bottom tile
+        val bottom    = voxel.bottomHeight(nc, nr)
+        val wasBottom = (bottom == null) || (targetHeight <= bottom)
+        if (wasBottom) {
+            val newBottom = targetHeight - 1
+            if (newBottom >= MIN_WORLD_DEPTH) voxel.setTile(nc, nr, newBottom, removed)
+        }
     }
-
 
     // ── Movement ──────────────────────────────────────────────────────────────
+    //
+    // Jump rules (simplified, cube-world feel):
+    //   • Walking (tap, no jump): only allowed if dest is same height or LOWER.
+    //     Steps DOWN of any amount are free (player falls).
+    //   • Jumping (swipe):        allowed if dest is exactly 1 tile higher, or lower.
+    //     Cannot jump MORE than 1 tile up.
     fun move(dc: Int, dr: Int, shouldJump: Boolean = false) {
         if (won || isJumping) return
+        val nc = targetCol + dc; val nr = targetRow + dr
+        val level = LevelManager.currentLevel
+        if (nc < 0 || nr < 0 || nc >= level.cols || nr >= level.rows) return
 
-        val nc = targetCol + dc
-        val nr = targetRow + dr
+        // Blocker special cells always block
+        if (specialCells[Pair(nc, nr)] == ObjectType.BLOCKER) return
 
-        // Resolve destination — overlay takes priority over level grid
-        val destBuilt = builtTiles[Pair(nc, nr)]
-        val destLevel = LevelManager.currentLevel.tile(nc, nr)
+        val destTopH = voxel.reachableTopHeight(nc, nr, targetHeight, this) ?: return
 
-        // Nothing there at all
-        if (destBuilt == null && destLevel == null) return
+        val destChar     = voxel.tileAt(nc, nr, destTopH)
+        val tileType     = destChar?.let { TileRegistry.get(it) }
+        val hOff         = tileType?.getHeightOffset(this, nc, nr) ?: 0f
+        val destTopFloat = destTopH.toFloat() + hOff
+        // heightDiff > 0 means dest surface is HIGHER than current player bottom
+        val heightDiff   = destTopFloat - (targetHeight - 1).toFloat()
 
-        // Broken leaf tiles are void
-        if (brokenLeaves.contains(Pair(nc, nr))) return
+        // Door check
+        if (destChar == 'D' && doorOpenProgress < 0.9f) return
 
-        // Door check (level tile only)
-        if (destBuilt == null && destLevel?.type?.charCode == 'D' && doorOpenProgress < 0.9f) return
-
-        // Walkability — built tiles are always walkable
-        if (destBuilt == null && destLevel?.isWalkable == false) return
-
-        // Leaf tile contact — hit it when the player attempts to move onto it
-        // (whether or not the move ultimately succeeds due to height checks).
-        if (destBuilt == null && destLevel?.type?.charCode == 'F') hitLeaf(nc, nr)
-
-        val currentH = targetHeight.toFloat()
-        val destH: Float = when {
-            destBuilt != null -> destBuilt.height.toFloat()
-            else -> {
-                val t = destLevel!!
-                t.height.toFloat() + t.type.getHeightOffset(this, nc, nr)
-            }
-        }
-        val heightDiff = destH - currentH
-
-        // Barrier (K) jump checks only apply to level tiles
-        if (destBuilt == null && destLevel?.type?.charCode == 'K') {
-            if (heightDiff > 1.2f && !shouldJump) return
-            if (heightDiff > 2.0f &&  shouldJump) return
+        // ── Height gating ──────────────────────────────────────────────────────
+        // Going UP: require a jump; only 1 tile up permitted.
+        if (heightDiff > 0f) {
+            if (!shouldJump) return          // must swipe to go up at all
+            if (heightDiff > 1.0f) return    // can't jump more than 1 tile
         }
 
-        val newTargetHeight = destH.toInt()
+        // ── Barrier (K) extra check ────────────────────────────────────────────
+        // K tiles bob; treat same as regular height rules above — no special case
+        // needed beyond the existing height gating, but keep sanity cap.
+        if (destChar == 'K' && heightDiff > 1.0f) return
 
-        when {
-            abs(heightDiff) < 0.2f -> {
-                prevTargetCol = targetCol; prevTargetRow = targetRow
-                targetCol = nc; targetRow = nr; targetHeight = newTargetHeight
-                if (shouldJump) { isJumping = true; jumpProgress = 0f }
-            }
-            heightDiff > 0f && heightDiff <= 1.2f && shouldJump -> {
-                prevTargetCol = targetCol; prevTargetRow = targetRow
-                targetCol = nc; targetRow = nr; targetHeight = newTargetHeight
-                isJumping = true; jumpProgress = 0f
-            }
-            heightDiff < 0f -> {
-                prevTargetCol = targetCol; prevTargetRow = targetRow
-                targetCol = nc; targetRow = nr; targetHeight = newTargetHeight
-                if (shouldJump || heightDiff < -1.2f) { isJumping = true; jumpProgress = 0f }
-            }
+        // Leaf tile contact — hit on step attempt
+        if (destChar == 'F') hitLeaf(nc, nr)
+        // Abort if leaf just broke and tile is now gone
+        if (brokenLeaves.contains(Pair(nc, nr)) && voxel.tileAt(nc, nr, destTopH) == null) return
+
+        val newBottom = (destTopFloat + 1f).toInt()
+
+        prevTargetCol = targetCol; prevTargetRow = targetRow
+        targetCol = nc; targetRow = nr; targetHeight = newBottom
+
+        // Trigger jump animation when actually jumping upward OR for big drops
+        val prevSurfaceH = voxel.topHeight(prevTargetCol, prevTargetRow)?.plus(1) ?: 0
+        if (shouldJump || abs(newBottom - prevSurfaceH) > 1) {
+            isJumping = true; jumpProgress = 0f
+        }
+    }
+
+    // ── Leaf mechanic ─────────────────────────────────────────────────────────
+    fun hitLeaf(col: Int, row: Int) {
+        val key  = Pair(col, row)
+        val hits = (leafHits[key] ?: 0) + 1
+        if (hits >= LEAF_MAX_HITS) {
+            leafHits.remove(key)
+            brokenLeaves.add(key)
+            // Remove all leaf tiles in this column
+            voxel.columns[key]?.entries
+                ?.filter { it.value == 'F' }
+                ?.map { it.key }
+                ?.forEach { h -> voxel.removeTile(col, row, h) }
+        } else {
+            leafHits[key] = hits
         }
     }
 
@@ -590,10 +652,8 @@ class GameState {
     fun update(dt: Float) {
         stateTime += dt
         if (won) { winTimer += dt; return }
-
         physics.step(dt.toDouble())
 
-        // Door animation
         doorOpenProgress = if (isSwitchOn)
             (doorOpenProgress + dt * 2f).coerceAtMost(1f)
         else
@@ -602,41 +662,43 @@ class GameState {
         if (isJumping) updateJump(dt) else updateLerp(dt)
     }
 
-    private fun resolveHeightAt(col: Int, row: Int): Float {
-        val built = builtTiles[Pair(col, row)]
-        if (built != null) return built.height.toFloat()
-        val tile = LevelManager.currentLevel.tile(col, row) ?: return 0f
-        return if (tile.type.charCode == 'K')
-            tile.height.toFloat() + tile.type.getHeightOffset(this, col, row)
-        else
-            tile.height.toFloat()
+    // Bottom of player cube = top-of-stack + hOff + 1
+    private fun resolvePlayerHeightAt(col: Int, row: Int): Float {
+        val topH = voxel.topHeight(col, row) ?: return 0f
+        val char = voxel.tileAt(col, row, topH) ?: return 0f
+        val hOff = TileRegistry.get(char)?.getHeightOffset(this, col, row) ?: 0f
+        return topH.toFloat() + hOff + 1f
     }
 
     private fun updateJump(dt: Float) {
         jumpProgress += dt / JUMP_DURATION
         if (jumpProgress >= 1f) {
             jumpProgress = 1f; isJumping = false
-            playerHeight = resolveHeightAt(targetCol, targetRow)
+            playerCol    = targetCol.toFloat()
+            playerRow    = targetRow.toFloat()
+            playerHeight = resolvePlayerHeightAt(targetCol, targetRow)
             onArrived()
         } else {
             playerCol = prevTargetCol + (targetCol - prevTargetCol) * jumpProgress
             playerRow = prevTargetRow + (targetRow - prevTargetRow) * jumpProgress
-            val startH = resolveHeightAt(prevTargetCol, prevTargetRow)
-            val endH   = resolveHeightAt(targetCol, targetRow)
+            val startH = resolvePlayerHeightAt(prevTargetCol, prevTargetRow)
+            val endH   = resolvePlayerHeightAt(targetCol,     targetRow)
             val arc    = sin(jumpProgress * PI.toFloat()) * 0.8f
             playerHeight = startH + (endH - startH) * jumpProgress + arc
         }
     }
 
     private fun updateLerp(dt: Float) {
-        val level       = LevelManager.currentLevel
-        val currentTile = level.tile(targetCol, targetRow)
-        val isMoving    = currentTile?.type?.charCode in movingChars
+        // If standing on a moving platform, ride it visually
+        val topH    = voxel.topHeight(targetCol, targetRow)
+        val topChar = topH?.let { voxel.tileAt(targetCol, targetRow, it) }
+        val isMoving = topChar in movingChars
 
         val finalTc: Float
         val finalTr: Float
-        if (isMoving && currentTile != null) {
-            val off = currentTile.type.getPositionOffset(this, targetCol, targetRow)
+        if (isMoving && topChar != null && topH != null) {
+            val off = TileRegistry.get(topChar)?.getPositionOffset(this, targetCol, targetRow)
+                ?: Pair(0f, 0f)
             finalTc = targetCol + off.first
             finalTr = targetRow + off.second
         } else {
@@ -644,10 +706,10 @@ class GameState {
             finalTr = targetRow.toFloat()
         }
 
-        val th    = resolveHeightAt(targetCol, targetRow)
-        val ddx   = finalTc - playerCol
-        val ddy   = finalTr - playerRow
-        val ddh   = th      - playerHeight
+        val th     = resolvePlayerHeightAt(targetCol, targetRow)
+        val ddx    = finalTc - playerCol
+        val ddy    = finalTr - playerRow
+        val ddh    = th      - playerHeight
         val distSq = ddx * ddx + ddy * ddy + ddh * ddh
 
         if (distSq > 0.0001f) {
@@ -656,111 +718,66 @@ class GameState {
             playerRow    += ddy * step
             playerHeight += ddh * step
         } else {
-            playerCol    = finalTc
-            playerRow    = finalTr
-            playerHeight = th
+            playerCol     = finalTc
+            playerRow     = finalTr
+            playerHeight  = th
             prevTargetCol = targetCol
             prevTargetRow = targetRow
             onArrived()
         }
     }
 
-    // Called once the player fully arrives at targetCol/targetRow
     private fun onArrived() {
         checkTeleport()
         checkSwitch()
+        checkLeafUnderfoot()
         checkWin()
     }
 
-    // ── Leaf tile mechanic ───────────────────────────────────────────────────
-    // LEAF_MAX_HITS must match the value in TileRegistry.
-    private val LEAF_MAX_HITS = 3
-
-    // Called when the player arrives on a tile — damages a leaf tile underfoot.
-    private fun checkLeaf() {
-        val tile = LevelManager.currentLevel.tile(targetCol, targetRow) ?: return
-        if (tile.type.charCode == 'F') hitLeaf(targetCol, targetRow)
-    }
-
-    // Called from move() when the player attempts to step onto a leaf tile —
-    // damages it regardless of whether the move succeeds (contact = hit).
-    fun hitLeaf(col: Int, row: Int) {
-        val key  = Pair(col, row)
-        val hits = (leafHits[key] ?: 0) + 1
-        if (hits >= LEAF_MAX_HITS) {
-            leafHits.remove(key)          // tile is broken — treat as gone
-            brokenLeaves.add(key)
-        } else {
-            leafHits[key] = hits
-        }
-    }
-
-    // Cells whose leaf tile has been fully broken — renderer skips them,
-    // move() treats them as void.
-    val brokenLeaves = mutableSetOf<Pair<Int, Int>>()
-
     private fun checkWin() {
-        if (targetCol == LevelManager.currentLevel.goalX &&
-            targetRow == LevelManager.currentLevel.goalY) {
-            val goalTile = LevelManager.currentLevel.tile(targetCol, targetRow)
-            if (abs(playerHeight - (goalTile?.height ?: 0)) < 0.5f) won = true
-        }
+        val level = LevelManager.currentLevel
+        if (targetCol == level.goalX && targetRow == level.goalY) won = true
     }
 
-    private fun checkTeleport(): Boolean {
-        val currentTile = LevelManager.currentLevel.tile(targetCol, targetRow)
-        if (currentTile?.type?.charCode != 'T') { teleportLocked = false; return false }
-        if (teleportLocked) return false
-        val other = LevelManager.currentLevel.findOtherTeleport(targetCol, targetRow)
-            ?: return false
+    private fun checkTeleport() {
+        val topH = voxel.topHeight(targetCol, targetRow) ?: return
+        val char = voxel.tileAt(targetCol, targetRow, topH) ?: return
+        if (char != 'T') { teleportLocked = false; return }
+        if (teleportLocked) return
+        val other = LevelManager.currentLevel.findOtherTeleport(targetCol, targetRow, voxel)
+            ?: return
         targetCol     = other.first;  targetRow     = other.second
         prevTargetCol = other.first;  prevTargetRow = other.second
-        targetHeight  = LevelManager.currentLevel.tile(targetCol, targetRow)?.height ?: 0
-        playerCol    = targetCol.toFloat(); playerRow    = targetRow.toFloat()
-        playerHeight = targetHeight.toFloat()
-        isJumping    = false; jumpProgress = 0f; teleportLocked = true
-        return true
+        val otherTop  = voxel.topHeight(targetCol, targetRow) ?: 0
+        targetHeight  = otherTop + 1
+        playerCol     = targetCol.toFloat(); playerRow    = targetRow.toFloat()
+        playerHeight  = targetHeight.toFloat()
+        isJumping = false; jumpProgress = 0f; teleportLocked = true
     }
 
     private fun checkSwitch() {
-        val currentTile = LevelManager.currentLevel.tile(targetCol, targetRow)
-        if (currentTile?.type?.charCode == 'W') isSwitchOn = true
+        val topH = voxel.topHeight(targetCol, targetRow) ?: return
+        val char = voxel.tileAt(targetCol, targetRow, topH) ?: return
+        if (char == 'W') isSwitchOn = true
     }
 
-    fun reset() {
-        won = false; winTimer = 0f; stateTime = 0f
-        isSwitchOn = false; doorOpenProgress = 0f
-        teleportLocked = false
-        isJumping = false; jumpProgress = 0f
-
-        targetCol     = LevelManager.currentLevel.startX
-        targetRow     = LevelManager.currentLevel.startY
-        prevTargetCol = LevelManager.currentLevel.startX
-        prevTargetRow = LevelManager.currentLevel.startY
-        playerCol     = LevelManager.currentLevel.startX.toFloat()
-        playerRow     = LevelManager.currentLevel.startY.toFloat()
-
-        val startTile = LevelManager.currentLevel.tile(
-            LevelManager.currentLevel.startX,
-            LevelManager.currentLevel.startY
-        )
-        targetHeight = startTile?.height ?: 0
-        playerHeight = targetHeight.toFloat()
-
-        builtTiles.clear()
-        leafHits.clear()
-        brokenLeaves.clear()
-        physics.build()
+    // Damage the leaf tile the player is standing on after fully arriving
+    private fun checkLeafUnderfoot() {
+        val standH = targetHeight - 1  // the tile top the player rests on
+        val char   = voxel.tileAt(targetCol, targetRow, standH) ?: return
+        if (char == 'F') hitLeaf(targetCol, targetRow)
     }
+
+    fun reset() { initLevel() }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  DRAW CALL QUEUE  (insertion-sort — allocation-free, fast for ≤512 entries)
+//  DRAW CALL QUEUE  (insertion-sort — stable, allocation-free, fast for ≤2048)
 // ═════════════════════════════════════════════════════════════════════════════
 
 fun interface DrawAction { fun draw() }
 
-class DrawCallQueue(capacity: Int = 512) {
+class DrawCallQueue(capacity: Int = 2048) {
     private val keys = FloatArray(capacity)
     private val fns  = arrayOfNulls<DrawAction>(capacity)
     private var size = 0
@@ -771,12 +788,10 @@ class DrawCallQueue(capacity: Int = 512) {
     }
 
     fun flush() {
-        // Insertion sort — stable, O(n²) but n ≤ 512 and nearly sorted in practice
+        // Insertion sort — stable, O(n²) but n ≤ 2048 and nearly sorted in practice
         for (i in 1 until size) {
             val k = keys[i]; val f = fns[i]!!; var j = i - 1
-            while (j >= 0 && keys[j] > k) {
-                keys[j + 1] = keys[j]; fns[j + 1] = fns[j]; j--
-            }
+            while (j >= 0 && keys[j] > k) { keys[j + 1] = keys[j]; fns[j + 1] = fns[j]; j-- }
             keys[j + 1] = k; fns[j + 1] = f
         }
         for (i in 0 until size) { fns[i]!!.draw(); fns[i] = null }
@@ -814,23 +829,25 @@ class IsoRenderer {
     private val bEdgeP   = Paint().apply { style = Paint.Style.STROKE; strokeWidth = 1.5f; isAntiAlias = true }
     private val bTextP   = Paint().apply { textAlign = Paint.Align.CENTER; isAntiAlias = true; typeface = Typeface.DEFAULT_BOLD }
     private val rippleP  = Paint().apply { style = Paint.Style.STROKE; strokeWidth = 2f;   isAntiAlias = true }
+    private val trayBgP  = Paint().apply { style = Paint.Style.FILL;   isAntiAlias = true }
+    private val trayTxtP = Paint().apply { textAlign = Paint.Align.CENTER; isAntiAlias = true; typeface = Typeface.DEFAULT_BOLD }
+    private val trayCntP = Paint().apply { textAlign = Paint.Align.CENTER; isAntiAlias = true }
+    private val traySelP = Paint().apply { style = Paint.Style.STROKE; strokeWidth = 3f;   isAntiAlias = true; color = Color.rgb(255, 230, 50) }
 
-    // ── Reusable path objects (avoid per-frame allocation) ────────────────────
+    // ── Reusable paths ────────────────────────────────────────────────────────
     private val topPath = Path()
     private val sideL   = Path()
     private val sideR   = Path()
-    private val queue   = DrawCallQueue(512)
+    private val queue   = DrawCallQueue(2048)
 
-    // ── Sky gradient cache ────────────────────────────────────────────────────
-    private var cachedSky: LinearGradient? = null
-    private var cachedSkyHeight = 0f
-
-    // ── Player gradient cache ─────────────────────────────────────────────────
+    // ── Caches ────────────────────────────────────────────────────────────────
+    private var cachedSky: LinearGradient?    = null
+    private var cachedSkyHeight               = 0f
     private var cachedPlayerGrad: RadialGradient? = null
     private var cachedPx = Float.MAX_VALUE
     private var cachedPy = Float.MAX_VALUE
 
-    // ── Object-pool slots (avoid lambda allocation per frame) ─────────────────
+    // ── Object-pool slots (avoid per-frame lambda allocation) ─────────────────
     private inner class TileSlot {
         var canvas: Canvas? = null; var cx = 0f; var cy = 0f
         var cTop = 0; var cL = 0; var cR = 0
@@ -853,8 +870,8 @@ class IsoRenderer {
         }
     }
 
-    private val tilePool   = Array(600) { TileSlot()  }  // 512 level + up to 88 built
-    private val objPool    = Array(64)  { ObjSlot()   }
+    private val tilePool   = Array(2048) { TileSlot()  }
+    private val objPool    = Array(64)   { ObjSlot()   }
     private val playerSlot = PlayerSlot()
     private var ti = 0; private var oi = 0
 
@@ -866,11 +883,9 @@ class IsoRenderer {
         t: Float, isIso: Boolean, rotation: Int
     ) {
         ti = 0; oi = 0
-
         if (isIso) {
             drawSky(canvas, sw, sh)
-            renderLevelTiles(canvas, state, ox, oy, t, rotation)
-            renderBuiltTiles(canvas, state, ox, oy, rotation)
+            renderVoxels(canvas, state, ox, oy, t, rotation)
             renderPlayer(canvas, state, ox, oy, rotation)
             queue.flush()
         } else {
@@ -882,20 +897,19 @@ class IsoRenderer {
         canvas: Canvas, sw: Float, sh: Float,
         won: Boolean, winTimer: Float, hint: String,
         btnView: RectF, btnRotL: RectF, btnRotR: RectF,
-        isIso: Boolean, rippleX: Float, rippleY: Float, rippleT: Float,
-        btnAction: RectF, currentActionLabel: String,
-        btnZoomIn: RectF, btnZoomOut: RectF
+        isIso: Boolean,
+        rippleX: Float, rippleY: Float, rippleT: Float,
+        btnAction: RectF, state: GameState,
+        btnZoomIn: RectF, btnZoomOut: RectF,
+        trayOpen: Boolean, trayRects: List<RectF>
     ) {
-        // Tap ripple
         if (rippleT in 0f..0.4f) {
             val prog = rippleT / 0.4f
             rippleP.color = Color.argb(((1f - prog) * 80).toInt(), 255, 255, 255)
             canvas.drawCircle(rippleX, rippleY, prog * 44f, rippleP)
         }
 
-        // Hint
-        hudSP.textSize = 13f
-        hudSP.color    = Color.argb(150, 255, 255, 255)
+        hudSP.textSize = 13f; hudSP.color = Color.argb(150, 255, 255, 255)
         hudSP.setShadowLayer(3f, 0f, 1f, Color.argb(70, 0, 0, 0))
         canvas.drawText(hint, sw / 2f, sh - 18f, hudSP)
 
@@ -909,12 +923,20 @@ class IsoRenderer {
             canvas.drawText(lbl, r.centerX(), r.centerY() + 7f, bTextP)
         }
 
-        btn(btnView, if (isIso) "TOP" else "ISO", !isIso)
-        btn(btnRotL, "↺")
-        btn(btnRotR, "↻")
-        btn(btnAction,  currentActionLabel, highlight = true)
+        btn(btnView,    if (isIso) "TOP" else "ISO", !isIso)
+        btn(btnRotL,    "↺")
+        btn(btnRotR,    "↻")
         btn(btnZoomIn,  "+")
         btn(btnZoomOut, "-")
+
+        val actionLabel = when (state.currentBuildAction) {
+            BuildAction.BUILD_TILE  -> "▲ ${tileDisplayName(state.currentPlaceTileChar)}"
+            BuildAction.REMOVE_TILE -> "✕ Remove"
+        }
+        btn(btnAction, actionLabel, highlight = true)
+
+        if (trayOpen) renderTilePicker(canvas, state, trayRects)
+        renderInventoryStrip(canvas, state, sw, sh)
 
         if (won) {
             val alpha = min(190, (winTimer * 280).toInt())
@@ -932,6 +954,88 @@ class IsoRenderer {
                     canvas.drawText("Tap anywhere to restart", sw / 2f, sh / 2f + 94f, hudSP)
                 }
             }
+        }
+    }
+
+    // ── Tile picker tray ──────────────────────────────────────────────────────
+
+    fun renderTilePicker(canvas: Canvas, state: GameState, trayRects: List<RectF>) {
+        val actionCount = BuildAction.entries.size
+        trayRects.forEachIndexed { i, rect ->
+            trayBgP.color = Color.argb(200, 20, 20, 30)
+            canvas.drawRoundRect(rect, 12f, 12f, trayBgP)
+
+            if (i < actionCount) {
+                val action     = BuildAction.entries[i]
+                val isSelected = state.currentBuildAction == action
+                if (isSelected) canvas.drawRoundRect(rect, 12f, 12f, traySelP)
+                trayTxtP.textSize = 15f
+                trayTxtP.color    = if (isSelected) Color.rgb(255, 230, 50) else Color.WHITE
+                canvas.drawText(action.label, rect.centerX(), rect.centerY() + 6f, trayTxtP)
+            } else {
+                val tileIndex = i - actionCount
+                if (tileIndex >= PLACEABLE_TILE_CHARS.size) return@forEachIndexed
+                val char      = PLACEABLE_TILE_CHARS[tileIndex]
+                val tileType  = TileRegistry.get(char) ?: return@forEachIndexed
+                val count     = state.inventory[char] ?: 0
+                val isSelected = state.currentBuildAction == BuildAction.BUILD_TILE &&
+                                 state.currentPlaceTileChar == char
+                if (isSelected) canvas.drawRoundRect(rect, 12f, 12f, traySelP)
+
+                // Mini iso tile preview — temporarily reduce scale vars
+                val savedHW = HALF_W; val savedHH = HALF_H; val savedSH = SIDE_H
+                HALF_W = 14f; HALF_H = 7f; SIDE_H = 28f   // keep cube proportions in preview
+                drawIsoTile(
+                    canvas, rect.left + rect.height() * 0.55f, rect.centerY() + 4f,
+                    tileType.getTopColor(state, 0, 0),
+                    tileType.getLeftColor(state, 0, 0),
+                    tileType.getRightColor(state, 0, 0)
+                )
+                HALF_W = savedHW; HALF_H = savedHH; SIDE_H = savedSH
+
+                trayTxtP.textSize = 13f
+                trayTxtP.color    = if (count > 0) Color.WHITE else Color.argb(100, 255, 255, 255)
+                canvas.drawText(tileDisplayName(char), rect.centerX() + 10f, rect.centerY() + 1f, trayTxtP)
+                trayCntP.textSize = 11f
+                trayCntP.color    = if (count > 0) Color.rgb(100, 255, 160) else Color.rgb(200, 80, 80)
+                canvas.drawText("×$count", rect.centerX() + 10f, rect.centerY() + 16f, trayCntP)
+            }
+        }
+    }
+
+    // ── Inventory strip ───────────────────────────────────────────────────────
+    private fun renderInventoryStrip(canvas: Canvas, state: GameState, sw: Float, sh: Float) {
+        val cellW = 58f; val cellH = 36f
+        val totalW = PLACEABLE_TILE_CHARS.size * cellW
+        var x = (sw - totalW) / 2f
+        val y = sh - 40f - cellH
+
+        for (char in PLACEABLE_TILE_CHARS) {
+            val count    = state.inventory[char] ?: 0
+            val tileType = TileRegistry.get(char) ?: continue
+            val isActive = state.currentBuildAction == BuildAction.BUILD_TILE &&
+                           state.currentPlaceTileChar == char
+
+            val rect = RectF(x, y, x + cellW - 4f, y + cellH)
+            trayBgP.color = if (isActive) Color.argb(200, 60, 50, 0) else Color.argb(120, 0, 0, 0)
+            canvas.drawRoundRect(rect, 8f, 8f, trayBgP)
+            if (isActive) canvas.drawRoundRect(rect, 8f, 8f, traySelP)
+
+            // Keep cube proportions in the inventory strip preview
+            val savedHW = HALF_W; val savedHH = HALF_H; val savedSH = SIDE_H
+            HALF_W = 10f; HALF_H = 5f; SIDE_H = 20f
+            drawIsoTile(
+                canvas, x + 14f, y + 16f,
+                tileType.getTopColor(state, 0, 0),
+                tileType.getLeftColor(state, 0, 0),
+                tileType.getRightColor(state, 0, 0)
+            )
+            HALF_W = savedHW; HALF_H = savedHH; SIDE_H = savedSH
+
+            trayCntP.textSize = 12f
+            trayCntP.color = if (count > 0) Color.WHITE else Color.argb(80, 255, 255, 255)
+            canvas.drawText("×$count", x + cellW * 0.65f, y + cellH * 0.65f, trayCntP)
+            x += cellW
         }
     }
 
@@ -962,7 +1066,8 @@ class IsoRenderer {
 
     private fun enqueueTile(
         canvas: Canvas, rc: Float, rr: Float, h: Float,
-        cTop: Int, cL: Int, cR: Int, isDoor: Boolean, doorProg: Float,
+        cTop: Int, cL: Int, cR: Int,
+        isDoor: Boolean, doorProg: Float,
         ox: Float, oy: Float
     ) {
         if (ti >= tilePool.size) return
@@ -972,95 +1077,92 @@ class IsoRenderer {
         s.canvas = canvas; s.cx = tx; s.cy = ty
         s.cTop = cTop; s.cL = cL; s.cR = cR
         s.isDoor = isDoor; s.doorProg = doorProg
-        queue.add(rc + rr + h * 0.01f, s.fn)
+        // Sort key: col+row positions give rough depth; height is fractional to
+        // keep stacked tiles within the same cell in correct order
+        queue.add(rc + rr + h * 0.001f, s.fn)
     }
 
-    private fun renderLevelTiles(
+    // ── Voxel renderer ────────────────────────────────────────────────────────
+
+    private fun renderVoxels(
         canvas: Canvas, state: GameState,
         ox: Float, oy: Float, t: Float, rotation: Int
     ) {
         val level = LevelManager.currentLevel
-        for (r in 0 until level.rows) for (c in 0 until level.cols) {
-            val tile = level.tile(c, r) ?: continue
-            if (state.brokenLeaves.contains(Pair(c, r))) continue  // leaf fully broken
-            val h    = tile.height.toFloat() + tile.type.getHeightOffset(state, c, r)
 
-            var (rc, rr) = rotatedCoords(c.toFloat(), r.toFloat(), rotation)
-
-            // Moving platform position adjustment
-            if (tile.type.charCode in setOf('1', '2', '3', '4')) {
-                val off = tile.type.getPositionOffset(state, c, r)
-                val (mrc, mrr) = rotatedCoords(c + off.first, r + off.second, rotation)
-                rc = mrc; rr = mrr
-            }
-
-            enqueueTile(
-                canvas, rc, rr, h,
-                tile.type.getTopColor(state, c, r),
-                tile.type.getLeftColor(state, c, r),
-                tile.type.getRightColor(state, c, r),
-                isDoor = tile.type.charCode == 'D',
-                doorProg = state.doorOpenProgress,
-                ox, oy
-            )
-
-            // Enqueue object (blocker/goal)
-            if (tile.obj != ObjectType.NONE && oi < objPool.size) {
-                val cx = isoX(ox, rc + 0.5f, rr + 0.5f)
-                val cy = isoY(oy, rc + 0.5f, rr + 0.5f, h)
-                val s  = objPool[oi++]
-                s.canvas = canvas; s.cx = cx; s.cy = cy; s.obj = tile.obj; s.t = t
-                queue.add(rc + rr + h * 0.01f + 0.005f, s.fn)
-            }
-        }
-    }
-
-    private fun renderBuiltTiles(
-        canvas: Canvas, state: GameState,
-        ox: Float, oy: Float, rotation: Int
-    ) {
-        val builtType = TileRegistry.get('~')!!
-        for ((pos, built) in state.builtTiles) {
+        for ((pos, colMap) in state.voxel.columns) {
             val (c, r) = pos
-            val h      = built.height.toFloat()
-            val (rc, rr) = rotatedCoords(c.toFloat(), r.toFloat(), rotation)
-            enqueueTile(
-                canvas, rc, rr, h,
-                builtType.getTopColor(state, c, r),
-                builtType.getLeftColor(state, c, r),
-                builtType.getRightColor(state, c, r),
-                isDoor = false, doorProg = 0f,
-                ox, oy
-            )
+            if (c < 0 || r < 0 || c >= level.cols || r >= level.rows) continue
+
+            val special = state.specialCells[pos]
+            val topH    = colMap.keys.maxOrNull()
+
+            for ((h, char) in colMap) {
+                val tileType = TileRegistry.get(char) ?: TileRegistry.get('G')!!
+                val hOff     = tileType.getHeightOffset(state, c, r)
+                val visualH  = h.toFloat() + hOff
+
+                // Base iso coords, then apply moving-platform offset if any
+                var (rc, rr) = rotatedCoords(c.toFloat(), r.toFloat(), rotation)
+                val posOff   = tileType.getPositionOffset(state, c, r)
+                if (posOff.first != 0f || posOff.second != 0f) {
+                    val (mrc, mrr) = rotatedCoords(
+                        c + posOff.first, r + posOff.second, rotation
+                    )
+                    rc = mrc; rr = mrr
+                }
+
+                enqueueTile(
+                    canvas, rc, rr, visualH,
+                    tileType.getTopColor(state, c, r),
+                    tileType.getLeftColor(state, c, r),
+                    tileType.getRightColor(state, c, r),
+                    isDoor   = char == 'D',
+                    doorProg = state.doorOpenProgress,
+                    ox, oy
+                )
+
+                // Object overlay on the topmost tile of each column
+                if (h == topH && special != null && special != ObjectType.NONE && oi < objPool.size) {
+                    val cx = isoX(ox, rc + 0.5f, rr + 0.5f)
+                    val cy = isoY(oy, rc + 0.5f, rr + 0.5f, visualH)
+                    val s  = objPool[oi++]
+                    s.canvas = canvas; s.cx = cx; s.cy = cy; s.obj = special; s.t = t
+                    queue.add(rc + rr + visualH * 0.001f + 0.005f, s.fn)
+                }
+            }
         }
     }
 
+    // Player is rendered at (col+0.5, row+0.5) so it sits in the centre of its tile
     private fun renderPlayer(
         canvas: Canvas, state: GameState,
         ox: Float, oy: Float, rotation: Int
     ) {
-        val (prc, prr) = rotatedCoords(state.playerCol, state.playerRow, rotation)
+        // Rotate the logical (col, row) first, then add the 0.5 centering offset
+        val (prc, prr) = rotatedCoords(state.playerCol + 0.5f, state.playerRow + 0.5f, rotation)
         playerSlot.canvas = canvas; playerSlot.iso = true
-        playerSlot.cx = isoX(ox, prc + 0.5f, prr + 0.5f)
-        playerSlot.cy = isoY(oy, prc + 0.5f, prr + 0.5f, state.playerHeight)
-        queue.add(prc + prr + 0.5f + state.playerHeight * 0.01f + 0.005f, playerSlot.fn)
+        playerSlot.cx = isoX(ox, prc, prr)
+        playerSlot.cy = isoY(oy, prc, prr, state.playerHeight)
+        // Depth key uses the centred coords
+        queue.add(prc + prr + state.playerHeight * 0.001f + 0.005f, playerSlot.fn)
     }
 
     private fun renderTopDown(canvas: Canvas, state: GameState, ox: Float, oy: Float) {
         val level = LevelManager.currentLevel
         canvas.drawColor(Color.rgb(40, 45, 50))
-        val builtType = TileRegistry.get('~')!!
-
-        for (r in 0 until level.rows) for (c in 0 until level.cols) {
+        for ((pos, colMap) in state.voxel.columns) {
+            val (c, r) = pos
+            if (c < 0 || r < 0 || c >= level.cols || r >= level.rows) continue
+            val topH     = colMap.keys.maxOrNull() ?: continue
+            val char     = colMap[topH] ?: continue
+            val tileType = TileRegistry.get(char) ?: continue
             val x = tdX(ox, c.toFloat()); val y = tdY(oy, r.toFloat())
-            val color = state.builtTiles[Pair(c, r)]?.let { builtType.getTopColor(state, c, r) }
-                ?: level.tile(c, r)?.type?.getTopColor(state, c, r)
-                ?: continue
-            fillP.color = color
+            fillP.color = tileType.getTopColor(state, c, r)
             canvas.drawRect(x, y, x + TILE, y + TILE, fillP)
             canvas.drawRect(x, y, x + TILE, y + TILE, tdEdgeP)
         }
-
+        // Top-down player also centred in its tile
         val px = tdX(ox, state.playerCol) + TILE * 0.5f
         val py = tdY(oy, state.playerRow) + TILE * 0.5f
         fillP.color = Theme.player
@@ -1068,11 +1170,14 @@ class IsoRenderer {
     }
 
     // ── Tile drawing primitives ───────────────────────────────────────────────
+    //
+    // CUBE: SIDE_H == HALF_W * 2 (set at top of file), so each visible face is
+    // a perfect square (width = HALF_W*2, height = SIDE_H = HALF_W*2).
 
     private fun drawIsoTile(canvas: Canvas, cx: Float, cy: Float, cTop: Int, cL: Int, cR: Int) {
-        val tx = cx;         val ty = cy - HALF_H
+        val tx = cx;          val ty = cy - HALF_H
         val rx = cx + HALF_W; val ry = cy
-        val bx = cx;         val by = cy + HALF_H
+        val bx = cx;          val by = cy + HALF_H
         val lx = cx - HALF_W; val ly = cy
 
         topPath.reset()
@@ -1092,7 +1197,7 @@ class IsoRenderer {
     }
 
     private fun drawIsoDoor(canvas: Canvas, cx: Float, cy: Float, prog: Float) {
-        val h = 40f * (1f - prog)
+        val h = SIDE_H * (1f - prog)
         if (h <= 0f) return
 
         val tx = cx;          val ty = cy - HALF_H - h
@@ -1120,7 +1225,7 @@ class IsoRenderer {
         val base = cy - HALF_H
         when (obj) {
             ObjectType.BLOCKER -> {
-                val h = 32f
+                val h = SIDE_H
                 objTP.color = Theme.blocker
                 topPath.reset()
                 topPath.moveTo(cx, base - h - HALF_H); topPath.lineTo(cx + HALF_W, base - h)
@@ -1150,17 +1255,22 @@ class IsoRenderer {
         }
     }
 
+    // Player is drawn as a 1-unit cube matching the tile dimensions exactly
     private fun drawIsoPlayer(canvas: Canvas, cx: Float, cy: Float) {
         val base   = cy - HALF_H
-        val pw     = HALF_W * 0.55f
-        val ph     = HALF_H * 0.55f
-        val height = 28f
+        // Scale the player cube to the same proportions as a tile but slightly smaller
+        val scale  = 0.75f
+        val pw     = HALF_W * scale
+        val ph     = HALF_H * scale
+        val ps     = SIDE_H * scale   // player cube side height = same ratio as tiles
 
+        // Shadow ellipse under the player
         canvas.drawOval(cx - pw * 1.1f, base + ph * 0.4f, cx + pw * 1.1f, base + ph * 0.9f, shadowP)
 
+        // Rebuild gradient only when player has moved meaningfully
         if (abs(cx - cachedPx) > 3f || abs(cy - cachedPy) > 3f) {
             cachedPlayerGrad = RadialGradient(
-                cx - pw * 0.25f, base - height * 0.7f, pw * 1.4f,
+                cx - pw * 0.25f, base - ps * 0.7f, pw * 1.4f,
                 intArrayOf(Color.rgb(90, 170, 255), Theme.player, Theme.playerL),
                 floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.CLAMP
             )
@@ -1168,19 +1278,31 @@ class IsoRenderer {
         }
         playerTP.shader = cachedPlayerGrad
 
+        // Top face
         topPath.reset()
-        topPath.moveTo(cx, base - height - ph); topPath.lineTo(cx + pw, base - height)
-        topPath.lineTo(cx, base - height + ph); topPath.lineTo(cx - pw, base - height); topPath.close()
+        topPath.moveTo(cx,      base - ps - ph)
+        topPath.lineTo(cx + pw, base - ps)
+        topPath.lineTo(cx,      base - ps + ph)
+        topPath.lineTo(cx - pw, base - ps)
+        topPath.close()
         canvas.drawPath(topPath, playerTP); canvas.drawPath(topPath, playerEP)
 
+        // Left face
         sideL.reset()
-        sideL.moveTo(cx - pw, base - height); sideL.lineTo(cx, base - height + ph)
-        sideL.lineTo(cx, base + ph);          sideL.lineTo(cx - pw, base); sideL.close()
+        sideL.moveTo(cx - pw, base - ps)
+        sideL.lineTo(cx,      base - ps + ph)
+        sideL.lineTo(cx,      base + ph)
+        sideL.lineTo(cx - pw, base)
+        sideL.close()
         canvas.drawPath(sideL, playerLP); canvas.drawPath(sideL, playerEP)
 
+        // Right face
         sideR.reset()
-        sideR.moveTo(cx, base - height + ph); sideR.lineTo(cx + pw, base - height)
-        sideR.lineTo(cx + pw, base);          sideR.lineTo(cx, base + ph); sideR.close()
+        sideR.moveTo(cx,      base - ps + ph)
+        sideR.lineTo(cx + pw, base - ps)
+        sideR.lineTo(cx + pw, base)
+        sideR.lineTo(cx,      base + ph)
+        sideR.close()
         canvas.drawPath(sideR, playerRP); canvas.drawPath(sideR, playerEP)
     }
 
@@ -1217,19 +1339,20 @@ class GameInternalsView(context: Context, appContext: AppContext) :
     private var rotation = 0
 
     // ── Pending inputs (UI thread → game thread via @Volatile) ────────────────
-    @Volatile private var pendingDc:    Int     = 0
-    @Volatile private var pendingDr:    Int     = 0
-    @Volatile private var hasPending:   Boolean = false
-    @Volatile private var pendingReset: Boolean = false
-    @Volatile private var pendingJump:  Boolean = false
+    @Volatile private var pendingDc      = 0;     @Volatile private var pendingDr      = 0
+    @Volatile private var hasPending     = false;  @Volatile private var pendingReset   = false
+    @Volatile private var pendingJump    = false
+    @Volatile private var pendingBuildDc = 0;     @Volatile private var pendingBuildDr = 0
+    @Volatile private var hasPendingBuild = false
 
-    // Build: dc/dr of the direction to build in
-    @Volatile private var pendingBuildDc: Int     = 0
-    @Volatile private var pendingBuildDr: Int     = 0
-    @Volatile private var hasPendingBuild: Boolean = false
+    @Volatile private var pendingSelectChar:      Char         = ' '
+    @Volatile private var hasPendingSelectChar:   Boolean      = false
+    @Volatile private var pendingSelectAction:    BuildAction? = null
+    @Volatile private var hasPendingSelectAction: Boolean      = false
 
-    // Cycle the active build action (UI thread → game thread)
-    @Volatile private var hasPendingCycleAction: Boolean = false
+    // Tile picker tray — read on game thread, written on UI thread (boolean toggle, safe)
+    @Volatile private var trayOpen = false
+    private val trayRects = mutableListOf<RectF>()
 
     // ── Offsets ───────────────────────────────────────────────────────────────
     private var isoOx = 0f; private var isoOy = 0f
@@ -1237,21 +1360,18 @@ class GameInternalsView(context: Context, appContext: AppContext) :
     private fun ox() = if (isIso) isoOx else tdOx
     private fun oy() = if (isIso) isoOy else tdOy
 
-    // ── HUD ───────────────────────────────────────────────────────────────────
+    // ── HUD rects ─────────────────────────────────────────────────────────────
     private var rippleX = 0f; private var rippleY = 0f; private var rippleT = -1f
-    private val btnView = RectF(); private val btnRotL = RectF(); private val btnRotR = RectF()
-    private val btnAction  = RectF()  // cycles the active long-press action
-    private val btnZoomIn  = RectF()  // + zoom
-    private val btnZoomOut = RectF()  // - zoom
-
-    // Current zoom level — drives the projection scale vars via applyZoom()
+    private val btnView    = RectF(); private val btnRotL    = RectF()
+    private val btnRotR    = RectF(); private val btnAction  = RectF()
+    private val btnZoomIn  = RectF(); private val btnZoomOut = RectF()
     private var zoom = 1.0f
 
-    // Apply zoom: update the file-level projection vars and recompute offsets.
     private fun applyZoom(newZoom: Float) {
         zoom          = newZoom.coerceIn(ZOOM_MIN, ZOOM_MAX)
         HALF_W        = BASE_HALF_W        * zoom
         HALF_H        = BASE_HALF_H        * zoom
+        // Keep cube proportions: SIDE_H = HALF_W * 2
         SIDE_H        = BASE_SIDE_H        * zoom
         TILE          = BASE_TILE          * zoom
         HEIGHT_OFFSET = BASE_HEIGHT_OFFSET * zoom
@@ -1260,30 +1380,40 @@ class GameInternalsView(context: Context, appContext: AppContext) :
 
     private fun recomputeOffsets() {
         if (surfaceW == 0f) return
-        val midC = (LevelManager.currentLevel.cols - 1) / 2f
-        val midR = (LevelManager.currentLevel.rows - 1) / 2f
+        val level = LevelManager.currentLevel
+        val midC  = (level.cols - 1) / 2f
+        val midR  = (level.rows - 1) / 2f
         isoOx = surfaceW * 0.50f - (midC - midR) * HALF_W
         isoOy = surfaceH * 0.42f - (midC + midR) * HALF_H
-        tdOx  = (surfaceW - LevelManager.currentLevel.cols * TILE) * 0.5f
-        tdOy  = (surfaceH - LevelManager.currentLevel.rows * TILE) * 0.45f
+        tdOx  = (surfaceW - level.cols * TILE) * 0.5f
+        tdOy  = (surfaceH - level.rows * TILE) * 0.45f
+    }
+
+    private fun rebuildTrayRects() {
+        trayRects.clear()
+        val rowCount = BuildAction.entries.size + PLACEABLE_TILE_CHARS.size
+        val rowH = 46f; val gap = 5f
+        val rowW = btnAction.width().coerceAtLeast(130f)
+        val startY = btnAction.top - gap - rowCount * (rowH + gap)
+        val x = btnAction.left
+        for (i in 0 until rowCount) {
+            val top = startY + i * (rowH + gap)
+            trayRects.add(RectF(x, top, x + rowW, top + rowH))
+        }
     }
 
     // ── Gesture state ─────────────────────────────────────────────────────────
-    private var touchStartX   = 0f; private var touchStartY = 0f
+    private var touchStartX = 0f; private var touchStartY = 0f
     private val SWIPE_THRESHOLD = 40f
 
-    // ── Long-press detection (500 ms — Android standard) ─────────────────────
-    private val LONG_PRESS_MS    = 500L
-    private val uiHandler        = Handler(Looper.getMainLooper())
-    private var longPressPosted  = false
-    private var longPressFired   = false   // true once the runnable actually executes
-    private var longPressDc      = 0; private var longPressDr = 0
+    private val LONG_PRESS_MS   = 500L
+    private val uiHandler       = Handler(Looper.getMainLooper())
+    private var longPressPosted = false; private var longPressFired = false
+    private var longPressDc = 0; private var longPressDr = 0
 
     private val longPressRunnable = Runnable {
-        longPressPosted = false
-        longPressFired  = true
-        pendingBuildDc  = longPressDc
-        pendingBuildDr  = longPressDr
+        longPressPosted = false; longPressFired = true
+        pendingBuildDc = longPressDc; pendingBuildDr = longPressDr
         hasPendingBuild = true
     }
 
@@ -1303,17 +1433,13 @@ class GameInternalsView(context: Context, appContext: AppContext) :
         btnView.set(surfaceW / 2 - 26f, bm, surfaceW / 2 + 26f, bm + ubh)
         btnRotL.set(bm, bm, bm + ubw, bm + ubh)
         btnRotR.set(surfaceW - bm - ubw, bm, surfaceW - bm, bm + ubh)
-        // Action button — bottom-right corner
-        val abw = 80f
+        val abw = 120f
         btnAction.set(surfaceW - bm - abw, surfaceH - bm - ubh, surfaceW - bm, surfaceH - bm)
-
-        // Zoom buttons — bottom-left corner, stacked vertically
         val zbw = 44f; val zbh = 44f; val gap = 8f
         btnZoomIn.set( bm, surfaceH - bm - zbh * 2 - gap, bm + zbw, surfaceH - bm - zbh - gap)
         btnZoomOut.set(bm, surfaceH - bm - zbh,            bm + zbw, surfaceH - bm)
-
-        // Recompute offsets via applyZoom so scale stays consistent on rotation
         applyZoom(zoom)
+        rebuildTrayRects()
     }
 
     // ── Touch handling ────────────────────────────────────────────────────────
@@ -1325,53 +1451,65 @@ class GameInternalsView(context: Context, appContext: AppContext) :
                 touchStartX = sx; touchStartY = sy
                 rippleX = sx; rippleY = sy; rippleT = 0f
 
-                if (btnView.contains(sx, sy)) { isIso = !isIso; return }
-                if (btnRotL.contains(sx, sy)) { rotation = (rotation + 3) % 4; return }
-                if (btnRotR.contains(sx, sy)) { rotation = (rotation + 1) % 4; return }
-                if (btnAction.contains(sx, sy))  { hasPendingCycleAction = true; return }
-                if (btnZoomIn.contains(sx, sy))  { applyZoom(zoom + ZOOM_STEP); return }
-                if (btnZoomOut.contains(sx, sy)) { applyZoom(zoom - ZOOM_STEP); return }
-                if (state.won)                   { pendingReset = true; return }
+                if (btnView.contains(sx, sy))    { isIso = !isIso; trayOpen = false; return }
+                if (btnRotL.contains(sx, sy))    { rotation = (rotation + 3) % 4; trayOpen = false; return }
+                if (btnRotR.contains(sx, sy))    { rotation = (rotation + 1) % 4; trayOpen = false; return }
+                if (btnZoomIn.contains(sx, sy))  { applyZoom(zoom + ZOOM_STEP); trayOpen = false; return }
+                if (btnZoomOut.contains(sx, sy)) { applyZoom(zoom - ZOOM_STEP); trayOpen = false; return }
+                if (btnAction.contains(sx, sy))  { trayOpen = !trayOpen; rebuildTrayRects(); return }
 
-                // Compute direction toward touched tile for long-press build
+                if (trayOpen) {
+                    val actionCount = BuildAction.entries.size
+                    for ((i, rect) in trayRects.withIndex()) {
+                        if (rect.contains(sx, sy)) {
+                            if (i < actionCount) {
+                                pendingSelectAction    = BuildAction.entries[i]
+                                hasPendingSelectAction = true
+                            } else {
+                                val ti = i - actionCount
+                                if (ti < PLACEABLE_TILE_CHARS.size) {
+                                    pendingSelectChar      = PLACEABLE_TILE_CHARS[ti]
+                                    hasPendingSelectChar   = true
+                                    pendingSelectAction    = BuildAction.BUILD_TILE
+                                    hasPendingSelectAction = true
+                                }
+                            }
+                            trayOpen = false; return
+                        }
+                    }
+                    trayOpen = false; return
+                }
+
+                if (state.won) { pendingReset = true; return }
+
                 val (dc, dr) = tapDirection(sx, sy)
-                longPressDc   = dc; longPressDr = dr
-                longPressFired = false
-
-                // Schedule long press
+                longPressDc = dc; longPressDr = dr; longPressFired = false
                 uiHandler.postDelayed(longPressRunnable, LONG_PRESS_MS)
                 longPressPosted = true
             }
 
             MotionEvent.ACTION_MOVE -> {
-                // Cancel long press if finger moves significantly
                 val dx = sx - touchStartX; val dy = sy - touchStartY
-                if (longPressPosted && dx * dx + dy * dy > SWIPE_THRESHOLD * SWIPE_THRESHOLD) {
-                    cancelLongPressGesture()
-                }
+                if (longPressPosted && dx * dx + dy * dy > SWIPE_THRESHOLD * SWIPE_THRESHOLD)
+                    cancelPendingLongPress()
             }
 
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                cancelLongPressGesture()
-                if (ev.actionMasked == MotionEvent.ACTION_CANCEL) return
-                // If the long-press runnable already fired, don't also move
-                if (longPressFired) return
-
-                val dx   = sx - touchStartX; val dy = sy - touchStartY
-                val dist = sqrt(dx * dx + dy * dy)
-                resolveMove(dx, dy, dist)
+                cancelPendingLongPress()
+                if (ev.actionMasked == MotionEvent.ACTION_CANCEL || longPressFired) return
+                val dx = sx - touchStartX; val dy = sy - touchStartY
+                resolveMove(dx, dy, sqrt(dx * dx + dy * dy))
             }
         }
     }
 
-    private fun cancelLongPressGesture() {
+    private fun cancelPendingLongPress() {
         if (longPressPosted) {
             uiHandler.removeCallbacks(longPressRunnable)
             longPressPosted = false
         }
     }
 
-    // Returns the grid (dc, dr) toward which the touch points relative to the player
     private fun tapDirection(sx: Float, sy: Float): Pair<Int, Int> {
         val tapCol: Float; val tapRow: Float
         if (isIso) {
@@ -1393,7 +1531,6 @@ class GameInternalsView(context: Context, appContext: AppContext) :
     private fun resolveMove(dx: Float, dy: Float, dist: Float) {
         val moveDc: Int; val moveDr: Int
         if (dist > SWIPE_THRESHOLD) {
-            // Swipe → jump in swipe direction
             val swipeCol = (dx / HALF_W + dy / HALF_H) * 0.5f
             val swipeRow = (dy / HALF_H - dx / HALF_W) * 0.5f
             if (abs(swipeCol) > abs(swipeRow)) {
@@ -1403,13 +1540,11 @@ class GameInternalsView(context: Context, appContext: AppContext) :
             }
             pendingJump = true
         } else {
-            // Tap → move toward tapped tile
             val (dc, dr) = tapDirection(touchStartX, touchStartY)
             if (dc == 0 && dr == 0) return
             moveDc = dc; moveDr = dr
             pendingJump = false
         }
-
         val (finalDc, finalDr) = applyRotationToMove(moveDc, moveDr)
         pendingDc = finalDc; pendingDr = finalDr; hasPending = true
     }
@@ -1464,11 +1599,16 @@ class GameInternalsView(context: Context, appContext: AppContext) :
     private fun update(dt: Float) {
         if (pendingReset) {
             pendingReset = false; hasPending = false; hasPendingBuild = false
-            state.reset(); return
+            trayOpen = false; state.reset(); return
         }
-        if (hasPendingCycleAction) {
-            hasPendingCycleAction = false
-            state.cycleAction()
+        if (hasPendingSelectAction) {
+            hasPendingSelectAction = false
+            pendingSelectAction?.let { state.setAction(it) }
+            pendingSelectAction = null
+        }
+        if (hasPendingSelectChar) {
+            hasPendingSelectChar = false
+            state.selectTileType(pendingSelectChar)
         }
         if (hasPendingBuild) {
             hasPendingBuild = false
@@ -1499,8 +1639,9 @@ class GameInternalsView(context: Context, appContext: AppContext) :
                 state.won, state.winTimer, LevelManager.currentLevel.hint,
                 btnView, btnRotL, btnRotR, isIso,
                 rippleX, rippleY, rippleT,
-                btnAction, state.currentBuildAction.label,
-                btnZoomIn, btnZoomOut
+                btnAction, state,
+                btnZoomIn, btnZoomOut,
+                trayOpen, trayRects
             )
         } finally {
             canvas?.let { surfaceView.holder.unlockCanvasAndPost(it) }

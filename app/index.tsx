@@ -20,3 +20,7 @@ export default function Index() {
     </SafeAreaView>
   );
 }
+//if tile is removed and its the bottom then automatically add a new one of the same tipe to h-1 so there is still ground
+//inventory depletion/lemit
+//tile destroy leaves a little body to pick up by the player going onto that tile, inventory increased, fn depends on type destroyed
+//tree, inventory plant seed, afer X frames becomes Y then Z (full grown)
