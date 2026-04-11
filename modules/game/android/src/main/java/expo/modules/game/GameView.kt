@@ -83,8 +83,8 @@ import kotlin.math.*
 
 // ── Projection base constants (unscaled) ─────────────────────────────────────
 private const val BASE_HALF_W        = 36f
-private const val BASE_HALF_H        = 18f
-private const val BASE_SIDE_H        = 18f
+private const val BASE_HALF_H        = 20f
+private const val BASE_SIDE_H        = 20f
 private const val BASE_TILE          = 40f
 private const val BASE_HEIGHT_OFFSET = 20f
 
@@ -313,17 +313,17 @@ object LevelManager {
             )
         ))
 
-        // ── Level 1: Impossible Geometry Demo ────────────────────────────────
+        // ── Level 1: Impossi  ble Geometry Demo ────────────────────────────────
         levels.add(LevelLayout(
             layout = arrayOf(
-                arrayOf("X9", "..", "..", "..", "..", "..", "..", ".."),
-                arrayOf("..", "G0", "G0", "G0", "..", "..", "..", ".."),
+                arrayOf("P1", "P1", "..", "G3", "G3", "..", "..", ".."),
+                arrayOf("P1", "G0", "G0", "G0", "G3", "..", "..", ".."),
                 arrayOf("..", "G0", "G0", "G0", "..", "..", "..", ".."),  // link origin,      h=0
-                arrayOf("..", "G0", "G0", "G0", "..", "..", "..", ".."),
-                arrayOf("..", "..", "..", "..", "G0", "P2", "P2", ".."),  // link destination, h=2
+                arrayOf("P2", "G0", "G0", "G0", "..", "..", "..", ".."),
+                arrayOf("P2", "P2", "..", "..", "G0", "P2", "P2", ".."),  // link destination, h=2
                 arrayOf("..", "..", "..", "..", "P2", "P2", "P2", ".."),
                 arrayOf("..", "..", "..", "..", "P2", "P2", "P2", ".."),
-                arrayOf("..", "..", "..", "..", "..", "..", "..", "..")
+                arrayOf("..", "..", "..", "..", "..", "..", "..", "X9")
             ),
             startX = 1, startY = 1,
             hint = "Rotate camera (↺/↻) to connect the impossible path!",
@@ -348,6 +348,9 @@ object LevelManager {
                 ImpossibleLink(requiredRotation = 0, fromCol = 4, fromRow = 5, toCol = 3, toRow = 3),
             )
         ))
+
+
+
         levels.add(LevelLayout(
             layout = arrayOf(
                 arrayOf("..", "..", "..", "..", "..", "..", "..", ".."),
@@ -1109,19 +1112,30 @@ class IsoRenderer {
     }
 
     private fun drawIsoDoor(canvas: Canvas, cx: Float, cy: Float, prog: Float) {
-        val h = 40f * (1f - prog)
-        if (h <= 0f) return
-        val tx = cx;           val ty = cy - HALF_H - h
-        val rx = cx + HALF_W;  val ry = cy - h
-        val bx = cx;           val by = cy + HALF_H - h
-        val lx = cx - HALF_W;  val ly = cy - h
-        topPath.reset(); topPath.moveTo(tx, ty); topPath.lineTo(rx, ry); topPath.lineTo(bx, by); topPath.lineTo(lx, ly); topPath.close()
-        topP.color = Theme.doorTop; canvas.drawPath(topPath, topP); canvas.drawPath(topPath, edgeP)
-        sideL.reset(); sideL.moveTo(lx, ly); sideL.lineTo(bx, by); sideL.lineTo(bx, by + h + SIDE_H); sideL.lineTo(lx, ly + h + SIDE_H); sideL.close()
-        leftP.color = Theme.doorL; canvas.drawPath(sideL, leftP); canvas.drawPath(sideL, edgeP)
-        sideR.reset(); sideR.moveTo(bx, by); sideR.lineTo(rx, ry); sideR.lineTo(rx, ry + h + SIDE_H); sideR.lineTo(bx, by + h + SIDE_H); sideR.close()
-        rightP.color = Theme.doorR; canvas.drawPath(sideR, rightP); canvas.drawPath(sideR, edgeP)
-    }
+    // Always draw a stone floor so the cell is never transparent/empty.
+    // When fully open the door has sunk flush with the floor and only the
+    // recessed frame (slightly darker stone) remains visible.
+    val floorTop   = Color.rgb(110, 105,  98)   // slightly darker than stoneTop
+    val floorLeft  = Color.rgb( 80,  76,  70)
+    val floorRight = Color.rgb( 65,  62,  58)
+    drawIsoTile(canvas, cx, cy, floorTop, floorLeft, floorRight)
+
+    // Door panel slides downward as prog → 1. Stop rendering it once it
+    // has fully receded into the floor (h ≤ 0).
+    val h = 40f * (1f - prog)
+    if (h <= 0f) return
+
+    val tx = cx;           val ty = cy - HALF_H - h
+    val rx = cx + HALF_W;  val ry = cy - h
+    val bx = cx;           val by = cy + HALF_H - h
+    val lx = cx - HALF_W;  val ly = cy - h
+    topPath.reset(); topPath.moveTo(tx, ty); topPath.lineTo(rx, ry); topPath.lineTo(bx, by); topPath.lineTo(lx, ly); topPath.close()
+    topP.color = Theme.doorTop; canvas.drawPath(topPath, topP); canvas.drawPath(topPath, edgeP)
+    sideL.reset(); sideL.moveTo(lx, ly); sideL.lineTo(bx, by); sideL.lineTo(bx, by + h + SIDE_H); sideL.lineTo(lx, ly + h + SIDE_H); sideL.close()
+    leftP.color = Theme.doorL; canvas.drawPath(sideL, leftP); canvas.drawPath(sideL, edgeP)
+    sideR.reset(); sideR.moveTo(bx, by); sideR.lineTo(rx, ry); sideR.lineTo(rx, ry + h + SIDE_H); sideR.lineTo(bx, by + h + SIDE_H); sideR.close()
+    rightP.color = Theme.doorR; canvas.drawPath(sideR, rightP); canvas.drawPath(sideR, edgeP)
+}
 
     private fun drawIsoObj(canvas: Canvas, cx: Float, cy: Float, obj: ObjectType, t: Float) {
         val base = cy - HALF_H
