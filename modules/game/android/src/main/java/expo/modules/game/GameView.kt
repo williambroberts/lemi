@@ -316,13 +316,13 @@ object LevelManager {
         // ── Level 1: Impossi  ble Geometry Demo ────────────────────────────────
         levels.add(LevelLayout(
             layout = arrayOf(
-                arrayOf("P1", "P1", "..", "G3", "G3", "..", "..", ".."),
-                arrayOf("P1", "G0", "G0", "G0", "G3", "..", "..", ".."),
+                arrayOf("..", "..", "..", "G3", "G3", "..", "..", ".."),
+                arrayOf("..", "G0", "G0", "G0", "G3", "..", "..", ".."),
                 arrayOf("..", "G0", "G0", "G0", "..", "..", "..", ".."),  // link origin,      h=0
                 arrayOf("P2", "G0", "G0", "G0", "..", "..", "..", ".."),
-                arrayOf("P2", "P2", "..", "..", "G0", "P2", "P2", ".."),  // link destination, h=2
-                arrayOf("..", "..", "..", "..", "P2", "P2", "P2", ".."),
-                arrayOf("..", "..", "..", "..", "P2", "P2", "P2", ".."),
+                arrayOf("P2", "P2", "..", "..", "..", "..", "..", ".."),  // link destination, h=2
+                arrayOf("..", "..", "..", "..", "..", "..", "..", ".."),
+                arrayOf("..", "..", "..", "..", "..", "..", "..", ".."),
                 arrayOf("..", "..", "..", "..", "..", "..", "..", "X9")
             ),
             startX = 1, startY = 1,
@@ -611,6 +611,93 @@ class GameState {
         if (abs(built.height - targetHeight) > 1) return
         builtTiles.remove(key)
     }
+    private fun findProjectedNeighbour(
+    col: Int, row: Int, height: Int,
+    dc: Int, dr: Int
+): Pair<Int, Int>? {
+    val level = LevelManager.currentLevel
+
+    val (prc, prr) = rotatedCoords(col.toFloat(), row.toFloat(), currentRotation)
+    val pcx = isoX(0f, prc, prr)
+    val pcy = isoY(0f, prc, prr, height.toFloat())
+
+    val playerCorners = listOf(
+        Pair(pcx,          pcy - HALF_H),  // north
+        Pair(pcx + HALF_W, pcy          ),  // east
+        Pair(pcx,          pcy + HALF_H),  // south
+        Pair(pcx - HALF_W, pcy          )   // west
+    )
+
+    // Rotate dc/dr to screen space to find leading corner
+    val (rdc, rdr) = when (currentRotation % 4) {
+        1    -> Pair( dr, -dc)
+        2    -> Pair(-dc, -dr)
+        3    -> Pair(-dr,  dc)
+        else -> Pair( dc,  dr)
+    }
+    val leadingCorner = when {
+        rdc ==  1 && rdr ==  0 -> Pair(pcx + HALF_W, pcy         )  // east
+        rdc == -1 && rdr ==  0 -> Pair(pcx - HALF_W, pcy         )  // west
+        rdc ==  0 && rdr ==  1 -> Pair(pcx,          pcy + HALF_H)  // south
+        rdc ==  0 && rdr == -1 -> Pair(pcx,          pcy - HALF_H)  // north
+        else                   -> return null
+    }
+
+    var best: Pair<Int, Int>? = null
+    var bestH = Int.MIN_VALUE
+
+    for (r in 0 until level.rows) for (c in 0 until level.cols) {
+        if (c == col && r == row) continue
+        val tile = level.tile(c, r) ?: continue
+        if (!tile.isWalkable) continue
+        if (abs(c - col) + abs(r - row) <= 1) continue
+
+        val (rc, rr) = rotatedCoords(c.toFloat(), r.toFloat(), currentRotation)
+        val ccx = isoX(0f, rc, rr)
+        val ccy = isoY(0f, rc, rr, tile.height.toFloat())
+
+        val candCorners = listOf(
+            Pair(ccx,          ccy - HALF_H),  // north
+            Pair(ccx + HALF_W, ccy          ),  // east
+            Pair(ccx,          ccy + HALF_H),  // south
+            Pair(ccx - HALF_W, ccy          )   // west
+        )
+
+        // Find which player corners match candidate corners
+        val sharedPlayerCorners = playerCorners.filter { pc ->
+            candCorners.any { cc ->
+                abs(cc.first  - pc.first ) < 0.5f &&
+                abs(cc.second - pc.second) < 0.5f
+            }
+        }
+
+        // Must share exactly 2 corners = shared edge, not just a point or full overlap
+        if (sharedPlayerCorners.size != 2) continue
+
+        // Shared edge midpoint must be on the leading side
+        val midX = (sharedPlayerCorners[0].first  + sharedPlayerCorners[1].first)  / 2f
+        val midY = (sharedPlayerCorners[0].second + sharedPlayerCorners[1].second) / 2f
+        if (abs(midX - leadingCorner.first ) > 0.5f) continue
+        if (abs(midY - leadingCorner.second) > 0.5f) continue
+
+        if (tile.height > bestH) {
+            bestH = tile.height
+            best  = Pair(c, r)
+        }
+    }
+    return best
+}
+
+
+    private fun rotatedCoords(c: Float, r: Float, rotation: Int): Pair<Float, Float> {
+    val level = LevelManager.currentLevel
+    return when (rotation % 4) {
+        1    -> Pair(r, (level.cols - 1).toFloat() - c)
+        2    -> Pair((level.cols - 1).toFloat() - c, (level.rows - 1).toFloat() - r)
+        3    -> Pair((level.rows - 1).toFloat() - r, c)
+        else -> Pair(c, r)
+    }
+}
 
     fun move(dc: Int, dr: Int, shouldJump: Boolean = false) {
     if (won || isJumping) return
@@ -620,24 +707,13 @@ class GameState {
     var destBuilt = builtTiles[Pair(nc, nr)]
     var destLevel = LevelManager.currentLevel.tile(nc, nr)
 
-    // ── IMPOSSIBLE LINK CHECK ─────────────────────────────────────────────
-    // If the normal step lands in the void, check if the current cell has an
-    // active link at this rotation.  If so, snap destination to the partner.
-    // The visual projection already placed the partner tile visually adjacent,
-    // so the player is simply stepping onto what they can see.
     if (destBuilt == null && destLevel == null) {
-        val link = LevelManager.currentLevel.linksFrom(targetCol, targetRow)
-            .firstOrNull { it.requiredRotation == currentRotation }
-        if (link != null) {
-            nc        = link.toCol
-            nr        = link.toRow
-            destBuilt = builtTiles[Pair(nc, nr)]
-            destLevel = LevelManager.currentLevel.tile(nc, nr)
-            // Impossible link — bypass all height checks, just move there
+        val candidate = findProjectedNeighbour(targetCol, targetRow, targetHeight, dc, dr)
+        if (candidate != null) {
             prevTargetCol = targetCol; prevTargetRow = targetRow
-            targetCol    = nc
-            targetRow    = nr
-            targetHeight = destLevel?.height ?: targetHeight
+            targetCol    = candidate.first
+            targetRow    = candidate.second
+            targetHeight = LevelManager.currentLevel.tile(targetCol, targetRow)?.height ?: targetHeight
             return
         }
     }
