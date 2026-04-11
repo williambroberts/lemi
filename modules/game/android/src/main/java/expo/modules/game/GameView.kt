@@ -335,7 +335,7 @@ object LevelManager {
                 arrayOf("..", "G0", "G0", "G0", "..", "..", "..", ".."),
                 arrayOf("..", "G0", "G0", "I0", "..", "..", "..", ".."),  // bottom-right corner of G0 island
                 arrayOf("..", "..", "..", "..", "G0", "I2", "P2", ".."),  // top-left corner of P2 island
-                arrayOf("..", "..", "..", "..", "P2", "X9", "P2", ".."),
+                arrayOf("..", "..", "..", "..", "I2", "X9", "P2", ".."),
                 arrayOf("..", "..", "..", "..", "P2", "P2", "P2", ".."),
                 arrayOf("..", "..", "..", "..", "..", "..", "..", "..")
             ),
@@ -343,7 +343,9 @@ object LevelManager {
             hint = "Rotate to break the connection!",
             impossibleLinks = listOf(
                 ImpossibleLink(requiredRotation = 0, fromCol = 3, fromRow = 3, toCol = 5, toRow = 4),
-                ImpossibleLink(requiredRotation = 0, fromCol = 5, fromRow = 4, toCol = 3, toRow = 3)
+                ImpossibleLink(requiredRotation = 0, fromCol = 3, fromRow = 3, toCol = 4, toRow = 5),
+                ImpossibleLink(requiredRotation = 0, fromCol = 5, fromRow = 4, toCol = 3, toRow = 3),
+                ImpossibleLink(requiredRotation = 0, fromCol = 4, fromRow = 5, toCol = 3, toRow = 3),
             )
         ))
         levels.add(LevelLayout(
